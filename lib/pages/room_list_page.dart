@@ -24,6 +24,12 @@ class _RoomListPageState extends State<RoomListPage> {
   final List<_RoomSummary> _rooms = [];
   String _status = '';
 
+  @override
+  void initState() {
+    super.initState();
+    _fetchRooms();
+  }
+
   Future<void> _createRoomDialog() async {
     _CreateRoomResult? result;
     try {
@@ -147,6 +153,11 @@ class _RoomListPageState extends State<RoomListPage> {
       appBar: AppBar(
         title: const Text('Rooms'),
         actions: [
+          IconButton(
+            tooltip: 'Refresh rooms',
+            onPressed: _fetchRooms,
+            icon: const Icon(Icons.refresh),
+          ),
           TextButton(
             onPressed: _createRoomDialog,
             child: const Text('New room'),
@@ -185,6 +196,115 @@ class _RoomListPageState extends State<RoomListPage> {
       ),
     );
   }
+
+  Future<void> _fetchRooms() async {
+    if (!mounted) return;
+
+    setState(() {
+      _status = 'Loading rooms...';
+    });
+
+    final payload = jsonEncode({'user_id': widget.userId});
+    _logger.i('Requesting rooms (route 210): $payload');
+    widget.socketService.sendToRoute(210, payload);
+
+    final raw = await _waitForListRoomsResponse(timeout: const Duration(seconds: 8));
+    if (!mounted) return;
+
+    if (raw == null) {
+      setState(() => _status = 'No room list response received.');
+      return;
+    }
+
+    final resp = _tryParseListRoomsResponse(raw);
+    if (resp == null) {
+      setState(() => _status = 'Invalid room list response: $raw');
+      return;
+    }
+
+    if (!resp.success) {
+      setState(() => _status = resp.message.isNotEmpty ? resp.message : 'Failed to load rooms.');
+      return;
+    }
+
+    setState(() {
+      _rooms
+        ..clear()
+        ..addAll(resp.rooms);
+      _status = resp.message.isNotEmpty ? resp.message : 'Rooms loaded.';
+    });
+  }
+
+  Future<String?> _waitForListRoomsResponse({required Duration timeout}) async {
+    try {
+      return await widget.socketService.messages
+          .where((m) => m.isNotEmpty)
+          .where((m) => !m.startsWith('Error:'))
+          .where((m) => m != 'Disconnected')
+          .where(_looksLikeListRoomsJson)
+          .first
+          .timeout(timeout);
+    } catch (e) {
+      _logger.w('Timed out waiting for room list response: $e');
+      return null;
+    }
+  }
+
+  bool _looksLikeListRoomsJson(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      return decoded.containsKey('success') && decoded.containsKey('rooms');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _ListRoomsResponse? _tryParseListRoomsResponse(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+
+      final success = decoded['success'];
+      if (success is! bool) return null;
+
+      final message = decoded['message'];
+      final roomsRaw = decoded['rooms'];
+
+      final rooms = <_RoomSummary>[];
+      if (roomsRaw is List) {
+        for (final entry in roomsRaw) {
+          if (entry is! Map) continue;
+          final roomName = entry['room_name'] ?? entry['title'];
+          final roomId = entry['room_id'] ?? entry['id'];
+          final roomCode = entry['room_code'] ?? entry['code'];
+          final isPrivate = entry['is_private'];
+          final ownerId = entry['owner_id'];
+          final createdAt = entry['created_at'];
+
+          rooms.add(
+            _RoomSummary(
+              name: roomName is String && roomName.isNotEmpty ? roomName : 'Unnamed room',
+              isPrivate: isPrivate is bool ? isPrivate : false,
+              roomId: roomId is String ? roomId : '',
+              roomCode: roomCode is String ? roomCode : '',
+              ownerId: ownerId is String ? ownerId : '',
+              createdAt: createdAt is String ? createdAt : '',
+            ),
+          );
+        }
+      }
+
+      return _ListRoomsResponse(
+        success: success,
+        message: message is String ? message : '',
+        rooms: rooms,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
 }
 
 class _RoomSummary {
@@ -192,12 +312,16 @@ class _RoomSummary {
   final bool isPrivate;
   final String roomId;
   final String roomCode;
+  final String ownerId;
+  final String createdAt;
 
   const _RoomSummary({
     required this.name,
     required this.isPrivate,
     this.roomId = '',
     this.roomCode = '',
+    this.ownerId = '',
+    this.createdAt = '',
   });
 }
 
@@ -223,6 +347,18 @@ class _CreateRoomResponse {
     required this.roomCode,
     required this.roomName,
     required this.isPrivate,
+  });
+}
+
+class _ListRoomsResponse {
+  final bool success;
+  final String message;
+  final List<_RoomSummary> rooms;
+
+  const _ListRoomsResponse({
+    required this.success,
+    required this.message,
+    required this.rooms,
   });
 }
 
