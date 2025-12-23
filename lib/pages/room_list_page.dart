@@ -5,6 +5,7 @@ import 'package:logger/logger.dart';
 
 import '../services/socket_service.dart';
 import 'room_chat_page.dart';
+import 'room_list_support.dart';
 
 class RoomListPage extends StatefulWidget {
   final SocketService socketService;
@@ -24,7 +25,7 @@ class RoomListPage extends StatefulWidget {
 
 class _RoomListPageState extends State<RoomListPage> {
   final Logger _logger = Logger();
-  final List<_RoomSummary> _rooms = [];
+  final List<RoomSummary> _rooms = [];
   String _status = '';
 
   @override
@@ -34,11 +35,11 @@ class _RoomListPageState extends State<RoomListPage> {
   }
 
   Future<void> _createRoomDialog() async {
-    _CreateRoomResult? result;
+    CreateRoomResult? result;
     try {
-      result = await showDialog<_CreateRoomResult>(
+      result = await showDialog<CreateRoomResult>(
         context: context,
-        builder: (dialogContext) => const _CreateRoomDialog(),
+        builder: (dialogContext) => const CreateRoomDialog(),
       );
     } catch (e) {
       _logger.e('Dialog error: $e');
@@ -82,7 +83,7 @@ class _RoomListPageState extends State<RoomListPage> {
 
     setState(() {
       _rooms.add(
-        _RoomSummary(
+        RoomSummary(
           name: resp.roomName.isNotEmpty ? resp.roomName : result!.name,
           isPrivate: resp.isPrivate ?? result!.isPrivate,
           roomId: resp.roomId,
@@ -123,7 +124,7 @@ class _RoomListPageState extends State<RoomListPage> {
     }
   }
 
-  _CreateRoomResponse? _tryParseCreateRoomResponse(String raw) {
+  CreateRoomResponse? _tryParseCreateRoomResponse(String raw) {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return null;
@@ -137,7 +138,7 @@ class _RoomListPageState extends State<RoomListPage> {
       final roomName = decoded['room_name'];
       final isPrivate = decoded['is_private'];
 
-      return _CreateRoomResponse(
+      return CreateRoomResponse(
         success: success,
         message: message is String ? message : '',
         roomId: roomId is String ? roomId : '',
@@ -260,7 +261,7 @@ class _RoomListPageState extends State<RoomListPage> {
     try {
       result = await showDialog<String>(
         context: context,
-        builder: (dialogContext) => const _JoinRoomDialog(),
+        builder: (dialogContext) => const JoinRoomDialog(),
       );
     } catch (e) {
       _logger.e('Dialog error: $e');
@@ -316,7 +317,7 @@ class _RoomListPageState extends State<RoomListPage> {
           ? resp.title
           : (resp.roomId.isNotEmpty ? 'Room ${resp.roomId}' : 'Joined room');
       _rooms.add(
-        _RoomSummary(
+        RoomSummary(
           name: roomName,
           isPrivate: resp.isPrivate ?? false,
           roomId: resp.roomId,
@@ -358,7 +359,7 @@ class _RoomListPageState extends State<RoomListPage> {
     }
   }
 
-  _JoinRoomResponse? _tryParseJoinRoomResponse(String raw) {
+  JoinRoomResponse? _tryParseJoinRoomResponse(String raw) {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return null;
@@ -374,7 +375,7 @@ class _RoomListPageState extends State<RoomListPage> {
       final isPrivate = decoded['is_private'];
       final createdAt = decoded['created_at'];
 
-      return _JoinRoomResponse(
+      return JoinRoomResponse(
         success: success,
         message: message is String ? message : '',
         roomId: roomId is String ? roomId : '',
@@ -415,7 +416,7 @@ class _RoomListPageState extends State<RoomListPage> {
     }
   }
 
-  _ListRoomsResponse? _tryParseListRoomsResponse(String raw) {
+  ListRoomsResponse? _tryParseListRoomsResponse(String raw) {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return null;
@@ -426,7 +427,7 @@ class _RoomListPageState extends State<RoomListPage> {
       final message = decoded['message'];
       final roomsRaw = decoded['rooms'];
 
-      final rooms = <_RoomSummary>[];
+      final rooms = <RoomSummary>[];
       if (roomsRaw is List) {
         for (final entry in roomsRaw) {
           if (entry is! Map) continue;
@@ -438,7 +439,7 @@ class _RoomListPageState extends State<RoomListPage> {
           final createdAt = entry['created_at'];
 
           rooms.add(
-            _RoomSummary(
+            RoomSummary(
               name: roomName is String && roomName.isNotEmpty ? roomName : 'Unnamed room',
               isPrivate: isPrivate is bool ? isPrivate : false,
               roomId: roomId is String ? roomId : '',
@@ -450,7 +451,7 @@ class _RoomListPageState extends State<RoomListPage> {
         }
       }
 
-      return _ListRoomsResponse(
+      return ListRoomsResponse(
         success: success,
         message: message is String ? message : '',
         rooms: rooms,
@@ -460,199 +461,4 @@ class _RoomListPageState extends State<RoomListPage> {
     }
   }
 
-}
-
-class _RoomSummary {
-  final String name;
-  final bool isPrivate;
-  final String roomId;
-  final String roomCode;
-  final String ownerId;
-  final String createdAt;
-
-  const _RoomSummary({
-    required this.name,
-    required this.isPrivate,
-    this.roomId = '',
-    this.roomCode = '',
-    this.ownerId = '',
-    this.createdAt = '',
-  });
-}
-
-class _CreateRoomResult {
-  final String name;
-  final bool isPrivate;
-
-  const _CreateRoomResult({required this.name, required this.isPrivate});
-}
-
-class _CreateRoomResponse {
-  final bool success;
-  final String message;
-  final String roomId;
-  final String roomCode;
-  final String roomName;
-  final bool? isPrivate;
-
-  const _CreateRoomResponse({
-    required this.success,
-    required this.message,
-    required this.roomId,
-    required this.roomCode,
-    required this.roomName,
-    required this.isPrivate,
-  });
-}
-
-class _ListRoomsResponse {
-  final bool success;
-  final String message;
-  final List<_RoomSummary> rooms;
-
-  const _ListRoomsResponse({
-    required this.success,
-    required this.message,
-    required this.rooms,
-  });
-}
-
-class _JoinRoomResponse {
-  final bool success;
-  final String message;
-  final String roomId;
-  final String code;
-  final String title;
-  final String ownerId;
-  final bool? isPrivate;
-  final String createdAt;
-
-  const _JoinRoomResponse({
-    required this.success,
-    required this.message,
-    required this.roomId,
-    required this.code,
-    required this.title,
-    required this.ownerId,
-    required this.isPrivate,
-    required this.createdAt,
-  });
-}
-
-class _CreateRoomDialog extends StatefulWidget {
-  const _CreateRoomDialog();
-
-  @override
-  State<_CreateRoomDialog> createState() => _CreateRoomDialogState();
-}
-
-class _CreateRoomDialogState extends State<_CreateRoomDialog> {
-  final _nameController = TextEditingController();
-  bool _isPrivate = false;
-
-  @override
-  void dispose() {
-    _nameController.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final name = _nameController.text.trim();
-    if (name.isEmpty) return;
-    Navigator.of(context).pop(
-      _CreateRoomResult(name: name, isPrivate: _isPrivate),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('New room'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _nameController,
-            autofocus: true,
-            textInputAction: TextInputAction.done,
-            decoration: const InputDecoration(
-              labelText: 'Room name',
-              border: OutlineInputBorder(),
-            ),
-            onSubmitted: (_) => _submit(),
-          ),
-          const SizedBox(height: 12),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Private room'),
-            value: _isPrivate,
-            onChanged: (value) {
-              setState(() => _isPrivate = value ?? false);
-            },
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        ElevatedButton(
-          onPressed: _submit,
-          child: const Text('Create'),
-        ),
-      ],
-    );
-  }
-}
-
-class _JoinRoomDialog extends StatefulWidget {
-  const _JoinRoomDialog();
-
-  @override
-  State<_JoinRoomDialog> createState() => _JoinRoomDialogState();
-}
-
-class _JoinRoomDialogState extends State<_JoinRoomDialog> {
-  final _codeController = TextEditingController();
-
-  @override
-  void dispose() {
-    _codeController.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final code = _codeController.text.trim();
-    if (code.isEmpty) return;
-    Navigator.of(context).pop(code);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Join room'),
-      content: TextField(
-        controller: _codeController,
-        autofocus: true,
-        textCapitalization: TextCapitalization.characters,
-        textInputAction: TextInputAction.done,
-        decoration: const InputDecoration(
-          labelText: 'Room code',
-          border: OutlineInputBorder(),
-        ),
-        onSubmitted: (_) => _submit(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        ElevatedButton(
-          onPressed: _submit,
-          child: const Text('Join'),
-        ),
-      ],
-    );
-  }
 }

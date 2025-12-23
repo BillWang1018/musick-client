@@ -3,10 +3,11 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
+import 'package:youtube_player_iframe/youtube_player_iframe.dart' as ytp;
 
 import '../models/message_model.dart';
 import '../services/socket_service.dart';
-import '../widgets/message_bubble.dart';
+import '../widgets/room_chat_content.dart';
 
 class RoomChatPage extends StatefulWidget {
   final SocketService socketService;
@@ -34,12 +35,16 @@ class _RoomChatPageState extends State<RoomChatPage> {
   final TextEditingController _controller = TextEditingController();
   late final ScrollController _scrollController;
   late final String _selfName;
+  ytp.YoutubePlayerController? _ytController;
   StreamSubscription<String>? _sub;
   bool _sending = false;
   String _status = '';
   bool _isLoading = false;
   bool _hasMore = true;
   String _nextBeforeId = '';
+  static const double _minWebviewHeight = 100;
+  double _webviewHeight = 0;
+  String? _pendingYoutubeUrl;
 
   @override
   void initState() {
@@ -56,6 +61,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
   @override
   void dispose() {
     _sub?.cancel();
+    _ytController?.close();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -126,6 +132,10 @@ class _RoomChatPageState extends State<RoomChatPage> {
                   timestamp: _parseTime(sentAt),
                 ),
               );
+              final youtubeLink = _extractYoutubeUrl(body);
+              if (youtubeLink != null) {
+                _pendingYoutubeUrl = youtubeLink;
+              }
             }
             _status = '';
           });
@@ -141,14 +151,19 @@ class _RoomChatPageState extends State<RoomChatPage> {
     final text = _controller.text.trim();
     if (text.isEmpty || _sending) return;
 
+    final youtubeLink = _extractYoutubeUrl(text);
+
     setState(() {
       _sending = true;
       _status = '';
+      if (youtubeLink != null) {
+        _pendingYoutubeUrl = youtubeLink;
+      }
       _messages.add(
         Message(
           content: text,
           isFromUser: true,
-                  senderName: _selfName,
+          senderName: _selfName,
           senderId: widget.userId,
           delivered: false,
           id: '',
@@ -177,56 +192,97 @@ class _RoomChatPageState extends State<RoomChatPage> {
 
   @override
   Widget build(BuildContext context) {
+    final maxWebHeight = MediaQuery.of(context).size.height * 0.55;
     return Scaffold(
       appBar: AppBar(
         title: Text('Room: ${widget.roomName}'),
       ),
       body: Column(
         children: [
-          if (_status.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text(_status, textAlign: TextAlign.center),
-            ),
+          _buildWebViewPane(maxWebHeight),
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              controller: _scrollController,
-              itemCount: _messages.length,
-              itemBuilder: (context, index) => MessageBubble(message: _messages[index]),
+            child: RoomChatContent(
+              messages: _messages,
+              scrollController: _scrollController,
+              textController: _controller,
+              sending: _sending,
+              status: _status,
+              youtubeUrl: _pendingYoutubeUrl,
+              onOpenYoutube: _pendingYoutubeUrl != null
+                  ? () => _openYoutubeInPlayer(_pendingYoutubeUrl!, maxWebHeight)
+                  : null,
+              onJumpToTimestamp: _pendingYoutubeUrl != null
+                  ? (seconds) => _jumpToTimestamp(seconds, maxWebHeight)
+                  : null,
+              extractTimestampSeconds: _extractTimestampSeconds,
+              onSend: _sendMessage,
             ),
           ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWebViewPane(double maxHeight) {
+    if (_webviewHeight <= 0 || _ytController == null) {
+      return const SizedBox.shrink();
+    }
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOut,
+      height: _webviewHeight,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.shade300),
+        ),
+      ),
+      child: Column(
+        children: [
+          Expanded(
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: ClipRRect(
+                  child: ytp.YoutubePlayerScaffold(
+                    controller: _ytController!,
+                    builder: (context, player) => player,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onVerticalDragUpdate: (details) {
+              setState(() {
+                _webviewHeight = (_webviewHeight + details.delta.dy)
+                    .clamp(_minWebviewHeight, maxHeight);
+              });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              height: 36,
               child: Row(
                 children: [
                   Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      enabled: !_sending,
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
+                    child: Center(
+                      child: Container(
+                        width: 64,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade500,
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       ),
-                      onSubmitted: (_) => _sendMessage(),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  FloatingActionButton(
-                    onPressed: _sending ? null : _sendMessage,
-                    mini: true,
-                    child: _sending
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.send),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: 'Close player',
+                    onPressed: () => setState(() => _webviewHeight = 0),
                   ),
                 ],
               ),
@@ -361,6 +417,80 @@ class _RoomChatPageState extends State<RoomChatPage> {
     } catch (_) {
       return null;
     }
+  }
+
+  String? _extractYoutubeUrl(String text) {
+    final regex = RegExp(
+      r'(https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/)[\w-]{11}|youtu\.be\/[\w-]{11})(?:[\w\-?&=%.]*)?)',
+      caseSensitive: false,
+    );
+    final match = regex.firstMatch(text);
+    return match?.group(0);
+  }
+
+  void _jumpToTimestamp(int seconds, double maxHeight) {
+    if (_ytController == null) {
+      final url = _pendingYoutubeUrl;
+      if (url != null) {
+        _openYoutubeInPlayer(url, maxHeight);
+      }
+    }
+    _ytController?.seekTo(
+      seconds: seconds.toDouble(),
+      allowSeekAhead: true,
+    );
+    _ytController?.playVideo();
+    setState(() {
+      if (_webviewHeight < _minWebviewHeight) {
+        _webviewHeight = _minWebviewHeight;
+      }
+    });
+  }
+
+  int? _extractTimestampSeconds(String text) {
+    final regex = RegExp(r'\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b');
+    final match = regex.firstMatch(text);
+    if (match == null) return null;
+    final hStr = match.group(1);
+    final mStr = match.group(2);
+    final sStr = match.group(3);
+    if (mStr == null || sStr == null) return null;
+    final hours = hStr != null ? int.tryParse(hStr) ?? 0 : 0;
+    final minutes = int.tryParse(mStr) ?? 0;
+    final seconds = int.tryParse(sStr) ?? 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  void _openYoutubeInPlayer(String url, double maxHeight) {
+    final videoId = ytp.YoutubePlayerController.convertUrlToId(url);
+    if (videoId == null || videoId.isEmpty) {
+      _logger.w('Could not parse YouTube video ID from: $url');
+      return;
+    }
+
+    if (_ytController == null) {
+      _ytController = ytp.YoutubePlayerController.fromVideoId(
+        videoId: videoId,
+        autoPlay: true,
+        params: const ytp.YoutubePlayerParams(
+          mute: false,
+          showFullscreenButton: true,
+          showControls: true,
+          playsInline: true,
+          origin: 'https://www.youtube-nocookie.com',
+        ),
+      );
+    } else {
+      _ytController!.loadVideoById(videoId: videoId, startSeconds: 0);
+      _ytController!.playVideo();
+    }
+
+    setState(() {
+      _pendingYoutubeUrl = url;
+      _webviewHeight = _webviewHeight > 0
+          ? (_webviewHeight < _minWebviewHeight ? _minWebviewHeight : _webviewHeight)
+          : (maxHeight * 0.5 < _minWebviewHeight ? _minWebviewHeight : maxHeight * 0.5);
+    });
   }
 
   DateTime? _parseTime(dynamic value) {
