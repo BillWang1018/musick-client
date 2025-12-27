@@ -86,6 +86,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
       if (roomId is String && roomId == widget.roomId) {
         final body = decoded['body'];
         final senderId = decoded['sender_id'];
+        final senderNameRaw = decoded['sender_name'];
         final success = decoded['success'];
         final id = decoded['id'];
         final sentAt = decoded['sent_at'] ?? decoded['created_at'];
@@ -116,16 +117,26 @@ class _RoomChatPageState extends State<RoomChatPage> {
 
         // Messages from others (or from server broadcast).
         if (body is String && body.isNotEmpty) {
-          final senderName = senderId is String && senderId.isNotEmpty ? senderId : 'Server';
+            final shouldStickToBottom = _isNearBottom();
+            final senderName = senderId is String && senderId.isNotEmpty
+              ? senderId
+              : (senderNameRaw is String && senderNameRaw.isNotEmpty
+                ? senderNameRaw
+                : 'Server');
           setState(() {
             final already = _messages.any((m) => m.id.isNotEmpty && m.id == (id is int ? id.toString() : (id is String ? id : '')));
             if (!already) {
               final isSelf = senderId is String && senderId == widget.userId;
+              final displayName = isSelf
+                  ? _selfName
+                  : (senderNameRaw is String && senderNameRaw.isNotEmpty
+                      ? senderNameRaw
+                      : senderName);
               _messages.add(
                 Message(
                   content: body,
                   isFromUser: isSelf,
-                  senderName: isSelf ? _selfName : senderName,
+                  senderName: displayName,
                   senderId: senderId is String ? senderId : '',
                   delivered: true,
                   id: id is int ? id.toString() : (id is String ? id : ''),
@@ -139,6 +150,9 @@ class _RoomChatPageState extends State<RoomChatPage> {
             }
             _status = '';
           });
+          if (shouldStickToBottom) {
+            _scrollToBottom();
+          }
         }
         return;
       }
@@ -152,6 +166,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
     if (text.isEmpty || _sending) return;
 
     final youtubeLink = _extractYoutubeUrl(text);
+    final shouldStickToBottom = _isNearBottom();
 
     setState(() {
       _sending = true;
@@ -181,6 +196,10 @@ class _RoomChatPageState extends State<RoomChatPage> {
     widget.socketService.sendToRoute(301, payload);
 
     _controller.clear();
+
+    if (shouldStickToBottom) {
+      _scrollToBottom();
+    }
 
     // Optionally wait briefly for a response to surface errors; not required.
     Future.delayed(const Duration(milliseconds: 200)).then((_) {
@@ -298,7 +317,10 @@ class _RoomChatPageState extends State<RoomChatPage> {
     _isLoading = true;
     setState(() => _status = 'Loading messages...');
     await _fetchMessages(limit: 30, beforeId: '');
-    if (mounted) setState(() => _status = '');
+    if (mounted) {
+      setState(() => _status = '');
+      _scrollToBottom(animate: false);
+    }
     _isLoading = false;
   }
 
@@ -502,6 +524,29 @@ class _RoomChatPageState extends State<RoomChatPage> {
       }
     }
     return null;
+  }
+
+  bool _isNearBottom({double threshold = 120}) {
+    if (!_scrollController.hasClients) return true;
+    final position = _scrollController.position;
+    return (position.maxScrollExtent - position.pixels) <= threshold;
+  }
+
+  void _scrollToBottom({bool animate = true}) {
+    if (!_scrollController.hasClients) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final target = _scrollController.position.maxScrollExtent;
+      if (animate) {
+        _scrollController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(target);
+      }
+    });
   }
 }
 

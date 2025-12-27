@@ -32,6 +32,10 @@ Run:
 
 `flutter pub get`
 
+Notes on media features:
+
+- Uses `youtube_player_iframe` for in-app playback; ensure `flutter pub get` has been run after pulling.
+
 ### 3) Run
 
 Run:
@@ -56,6 +60,11 @@ Run:
 - `lib/pages/echo_page.dart`
 	- Simple echo/chat UI
 	- App bar title can be customized (used after login for `welcome! <userid>`)
+
+- `lib/pages/room_chat_page.dart`
+	- Room messaging with draggable media pane
+	- Sending any YouTube link shows an "Open in player" button; player docks at the top and can be resized/closed
+	- Timestamps in messages (e.g., `03:32` or `1:02:05`) add a "Jump" button that seeks the current video without reloading
 
 - `lib/pages/supabase_auth_page.dart`
 	- Supabase sign-in UI
