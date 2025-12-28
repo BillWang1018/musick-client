@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart'; // 1. 記得引入 provider
 import '../services/socket_service.dart';
 import 'supabase_auth_page.dart';
 
@@ -44,7 +45,12 @@ class _ConnectPageState extends State<ConnectPage> {
       _statusMessage = 'Connecting...';
     });
 
-    final socketService = SocketService();
+    // --- 關鍵修改開始 ---
+    // 原本：final socketService = SocketService(); // 這是錯的，會創造分身
+    // 修改為：直接從 Provider 獲取全域唯一的那個實體
+    final socketService = context.read<SocketService>(); 
+    // --- 關鍵修改結束 ---
+
     final connected = await socketService.connect(ip, port);
 
     if (mounted) {
@@ -52,6 +58,7 @@ class _ConnectPageState extends State<ConnectPage> {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
+            // 這裡依然把 socketService 傳下去，保持相容性
             builder: (context) => SupabaseAuthPage(socketService: socketService),
           ),
         );
