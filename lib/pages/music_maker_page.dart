@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import '../models/song_model.dart';
+import '../models/track_model.dart';
 import '../services/socket_service.dart';
+import '../services/track_repository.dart';
 
 class MusicMakerPage extends StatefulWidget {
   final Song song;
@@ -26,29 +29,77 @@ class MusicMakerPage extends StatefulWidget {
 }
 
 class _MusicMakerPageState extends State<MusicMakerPage> {
-  // Piano-roll defaults: bottom row starts at C3 (pitch=37), show 2 octaves.
-  static const int _basePitch = 37;
+  // Piano-roll defaults.
   static const int _octaveSpan = 12;
-  static const int _octaveCount = 2;
+  static const int _defaultBeatsPerMeasure = 4;
+  static const int _defaultBasePitch = 24; // C2
+  static const int _defaultOctaveCount = 2;
   static const double _cellSize = 44;
+  static const int _defaultVelocity = 100;
+  static const int _defaultLengthSteps = 1;
 
-  final List<Track> _tracks = [
-    // const Track(name: 'Drums', instrument: 'drums', color: 'blue'),
-    // const Track(name: 'Bass', instrument: 'bass', color: 'teal'),
-    // const Track(name: 'Lead', instrument: 'lead', color: 'purple'),
-    // const Track(name: 'Pad', instrument: 'pad', color: 'pink'),
-  ];
+  int _beatsPerMeasure = _defaultBeatsPerMeasure;
+  int _basePitch = _defaultBasePitch;
+  int _octaveCount = _defaultOctaveCount;
+  ScaleType _scale = ScaleType.major;
 
-  late List<Set<String>> _notesPerTrack;
+  final List<Track> _tracks = [];
+
+  final Map<String, Map<String, Note>> _notesByTrackId = {};
   late Song _currentSong;
+  late final TrackRepository _trackRepo;
   int _selectedTrack = 0;
   String _lastTapInfo = 'Tap a note to debug.';
+  StreamSubscription<String>? _trackSub;
+  StreamSubscription<NoteBroadcast>? _noteBroadcastSub;
 
   @override
   void initState() {
     super.initState();
     _currentSong = widget.song;
-    _notesPerTrack = List.generate(_tracks.length, (_) => <String>{});
+    _trackRepo = TrackRepository(widget.socketService);
+    _trackSub = widget.socketService.messages.listen(_handleIncomingTrackMessage);
+    _noteBroadcastSub = _trackRepo.noteBroadcasts(songId: widget.song.id).listen(_handleNoteBroadcast);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadInitialNotesAndTracks());
+  }
+
+  @override
+  void dispose() {
+    _noteBroadcastSub?.cancel();
+    _trackSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadInitialNotesAndTracks() async {
+    final response = await _trackRepo.listNotes(
+      userId: widget.userId,
+      roomId: widget.roomId,
+      songId: _currentSong.id,
+      trackId: '',
+    );
+    if (!mounted) return;
+    if (response == null) {
+      _showSnack('Timed out loading notes');
+      return;
+    }
+    if (!response.success) {
+      _showSnack(response.message.isNotEmpty ? response.message : 'Failed to load notes');
+    }
+    setState(() {
+      if (response.tracks.isNotEmpty) {
+        _tracks
+          ..clear()
+          ..addAll(response.tracks);
+        if (_selectedTrack >= _tracks.length) {
+          _selectedTrack = _tracks.isEmpty ? 0 : _tracks.length - 1;
+        }
+      }
+      _notesByTrackId.clear();
+      for (final note in response.notes) {
+        final noteMap = _notesByTrackId.putIfAbsent(note.trackId, () => <String, Note>{});
+        noteMap[_noteKey(note.step, note.pitch)] = note;
+      }
+    });
   }
 
   @override
@@ -63,6 +114,11 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       appBar: AppBar(
         title: Text(_currentSong.title),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.grid_on),
+            tooltip: 'Grid settings',
+            onPressed: _onEditGrid,
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Edit song',
@@ -126,28 +182,40 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       return const SizedBox.shrink();
     }
     final trackIndex = _selectedTrack.clamp(0, _tracks.length - 1);
+    final track = _tracks[trackIndex];
+    final notes = _notesByTrackId.putIfAbsent(track.id, () => <String, Note>{});
+    int beatLength = _beatsPerMeasure <= 0 ? _currentSong.steps : (_currentSong.steps / _beatsPerMeasure).round();
+    if (beatLength < 1) beatLength = 1;
+    if (beatLength > _currentSong.steps) beatLength = _currentSong.steps;
     return Column(
       children: List.generate(pitches.length, (rowIdx) {
         final pitch = pitches[pitches.length - 1 - rowIdx]; // top is highest pitch
         final isSharp = _isSharp(pitch);
+        final isScaleTone = _isScaleTone(pitch);
+        final octaveBoundary = pitch % _octaveSpan == 0; // C boundary
         return Row(
           children: List.generate(steps, (colIdx) {
             final key = _noteKey(colIdx, pitch);
-            final isActive = _notesPerTrack[trackIndex].contains(key);
+            final isActive = notes.containsKey(key);
+            final beatBoundary = colIdx % beatLength == 0;
+            final trackColor = colorForName(track.color);
+            final baseColor = isActive
+              ? trackColor.withValues(alpha: (trackColor.a * 0.65).clamp(0.0, 1.0))
+              : (isScaleTone
+                ? Colors.amber.shade50
+                : (isSharp ? Colors.blueGrey.shade50 : Colors.white));
             return GestureDetector(
               onTap: () => _handleTap(step: colIdx, pitch: pitch),
               child: Container(
                 width: _cellSize,
                 height: _cellSize,
                 decoration: BoxDecoration(
-                  color: isActive
-                      ? Colors.lightBlue.shade200
-                      : (isSharp ? Colors.blueGrey.shade50 : Colors.white),
+                  color: baseColor,
                   border: Border(
-                    top: BorderSide(color: Colors.grey.shade300, width: 0.5),
-                    left: BorderSide(color: Colors.grey.shade300, width: 0.5),
-                    right: BorderSide(color: Colors.grey.shade200, width: 0.25),
-                    bottom: BorderSide(color: Colors.grey.shade200, width: 0.25),
+                    top: BorderSide(color: Colors.grey.shade300, width: octaveBoundary ? 1.2 : 0.5),
+                    left: BorderSide(color: Colors.grey.shade400, width: beatBoundary ? 1.5 : 0.5),
+                    right: BorderSide(color: Colors.grey.shade200, width: 0.3),
+                    bottom: BorderSide(color: Colors.grey.shade200, width: 0.3),
                   ),
                 ),
               ),
@@ -177,12 +245,11 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
               children: [
                 CircleAvatar(
                   radius: 26,
-                  backgroundColor: selected
-                      ? _colorForName(track.color).withValues(alpha: 0.25)
-                      : Colors.grey.shade200,
+                          backgroundColor:
+                              selected ? colorForName(track.color).withValues(alpha: 0.25) : Colors.grey.shade200,
                   child: Icon(
-                    _iconForInstrument(track.instrument),
-                    color: selected ? _colorForName(track.color) : Colors.grey.shade700,
+                            iconForInstrument(track.instrument),
+                            color: selected ? colorForName(track.color) : Colors.grey.shade700,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -214,28 +281,81 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     );
   }
 
-  void _handleTap({required int step, required int pitch}) {
+  Future<void> _handleTap({required int step, required int pitch}) async {
     if (_tracks.isEmpty) return;
+    if (_selectedTrack >= _tracks.length) {
+      _selectedTrack = _tracks.length - 1;
+    }
     final track = _tracks[_selectedTrack];
-    final set = _notesPerTrack[_selectedTrack];
+    final notes = _notesByTrackId.putIfAbsent(track.id, () => <String, Note>{});
     final key = _noteKey(step, pitch);
-    final turnedOn = set.contains(key) ? false : true;
-
-    setState(() {
-      if (turnedOn) {
-        set.add(key);
-      } else {
-        set.remove(key);
+    final existing = notes[key];
+    if (existing == null) {
+      final optimistic = Note(
+        id: 'local_$key',
+        trackId: track.id,
+        step: step,
+        pitch: pitch,
+        velocity: _defaultVelocity,
+        lengthSteps: _defaultLengthSteps,
+      );
+      setState(() {
+        notes[key] = optimistic;
+        _lastTapInfo = 'On step ${step + 1}, pitch $pitch on track ${track.name}';
+      });
+      final response = await _trackRepo.createNote(
+        userId: widget.userId,
+        roomId: widget.roomId,
+        songId: _currentSong.id,
+        trackId: track.id,
+        step: step,
+        pitch: pitch,
+        velocity: _defaultVelocity,
+        lengthSteps: _defaultLengthSteps,
+      );
+      if (!mounted) return;
+      if (response == null || !response.success || response.note == null) {
+        setState(() {
+          notes.remove(key);
+        });
+        _showSnack(response?.message.isNotEmpty == true ? response!.message : 'Failed to add note');
+        return;
       }
-      _lastTapInfo = '${turnedOn ? 'On' : 'Off'} step ${step + 1}, pitch $pitch on track ${track.name}';
-    });
-    // Future: send to server; for now we just log/debug.
+      setState(() {
+        notes[key] = response.note!;
+      });
+    } else {
+      setState(() {
+        notes.remove(key);
+        _lastTapInfo = 'Off step ${step + 1}, pitch $pitch on track ${track.name}';
+      });
+      final response = await _trackRepo.deleteNote(
+        userId: widget.userId,
+        roomId: widget.roomId,
+        songId: _currentSong.id,
+        trackId: track.id,
+        step: step,
+        pitch: pitch,
+      );
+      if (!mounted) return;
+      if (response == null || !response.success) {
+        setState(() {
+          notes[key] = existing;
+        });
+        _showSnack(response?.message.isNotEmpty == true ? response!.message : 'Failed to delete note');
+      }
+    }
   }
 
   bool _isSharp(int pitch) {
     // pitch 1 = C0, so mod 12 gives chroma; sharps at 2,4,7,9,11.
     final chroma = pitch % 12;
     return chroma == 2 || chroma == 4 || chroma == 7 || chroma == 9 || chroma == 11;
+  }
+
+  bool _isScaleTone(int pitch) {
+    final chroma = pitch % 12;
+    return _scale == ScaleType.major ? _majorScale.contains(chroma) : _minorScale.contains(chroma);
   }
 
   String _noteKey(int step, int pitch) => '$step:$pitch';
@@ -255,10 +375,11 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
 
   Future<void> _showAddTrackDialog() async {
     final nameController = TextEditingController();
-    String selectedInstrument = _instrumentChoices.first.instrument;
-    String selectedColor = _trackColors.first.colorName;
+    String selectedInstrument = instrumentChoices.first.instrument;
+    String selectedColor = trackColors.first.colorName;
+    final channelController = TextEditingController();
 
-    final result = await showDialog<Track>(
+    final result = await showDialog<CreateTrackInput>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
@@ -282,12 +403,12 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                       labelText: 'Instrument',
                       border: OutlineInputBorder(),
                     ),
-                    items: _instrumentChoices
+                    items: instrumentChoices
                         .map((e) => DropdownMenuItem(
                               value: e.instrument,
                               child: Row(
                                 children: [
-                                  Icon(_iconForInstrument(e.instrument)),
+                                  Icon(iconForInstrument(e.instrument)),
                                   const SizedBox(width: 8),
                                   Text(e.label),
                                 ],
@@ -307,14 +428,14 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                       labelText: 'Color',
                       border: OutlineInputBorder(),
                     ),
-                    items: _trackColors
+                    items: trackColors
                         .map((e) => DropdownMenuItem(
                               value: e.colorName,
                               child: Row(
                                 children: [
                                   CircleAvatar(
                                     radius: 10,
-                                    backgroundColor: _colorForName(e.colorName),
+                                    backgroundColor: colorForName(e.colorName),
                                   ),
                                   const SizedBox(width: 8),
                                   Text(e.label),
@@ -328,6 +449,15 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                       });
                     },
                   ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: channelController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Channel (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
                 ],
               ),
               actions: [
@@ -338,14 +468,13 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                 ElevatedButton(
                   onPressed: () {
                     final name = nameController.text.trim();
-                    Navigator.of(context).pop(
-                      Track(
-                        name: name.isNotEmpty ? name : selectedInstrument,
-                        instrument: selectedInstrument,
-                        color: selectedColor,
-                        channel: null,
-                      ),
-                    );
+                    final channel = int.tryParse(channelController.text.trim());
+                    Navigator.of(context).pop(CreateTrackInput(
+                      name: name.isNotEmpty ? name : selectedInstrument,
+                      instrument: selectedInstrument,
+                      color: selectedColor,
+                      channel: channel,
+                    ));
                   },
                   child: const Text('Add'),
                 ),
@@ -357,12 +486,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     );
 
     if (result == null) return;
-
-    setState(() {
-      _tracks.add(result);
-      _notesPerTrack.add(<String>{});
-      _selectedTrack = _tracks.length - 1;
-    });
+    await _createTrackOnServer(result);
   }
 
   Future<void> _confirmDeleteTrack(int index) async {
@@ -390,13 +514,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
 
     if (confirmed != true) return;
 
-    setState(() {
-      _tracks.removeAt(index);
-      _notesPerTrack.removeAt(index);
-      if (_selectedTrack >= _tracks.length) {
-        _selectedTrack = _tracks.isEmpty ? 0 : _tracks.length - 1;
-      }
-    });
+    await _deleteTrackOnServer(track);
   }
 
   void _showSnack(String message) {
@@ -430,19 +548,14 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       return; // nothing to update
     }
 
-    final payload = jsonEncode(updates);
-    widget.socketService.sendToRoute(511, payload);
-
-    final raw = await _waitForUpdateSongResponse();
+    final response = await _trackRepo.updateSong(updates: updates);
     if (!mounted) return;
-    if (raw == null) {
+    if (response == null) {
       _showSnack('Timed out updating song');
       return;
     }
-
-    final response = _tryParseUpdateSongResponse(raw);
-    if (response == null || !response.success) {
-      _showSnack(response?.message ?? 'Failed to update song');
+    if (!response.success) {
+      _showSnack(response.message.isNotEmpty ? response.message : 'Failed to update song');
       return;
     }
 
@@ -522,139 +635,234 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     );
   }
 
-  Future<String?> _waitForUpdateSongResponse() async {
-    try {
-      return await widget.socketService.messages
-          .where((m) => m.isNotEmpty)
-          .where((m) => !m.startsWith('Error:'))
-          .where((m) => m != 'Disconnected')
-          .where(_looksLikeUpdateSongJson)
-          .first
-          .timeout(const Duration(seconds: 8));
-    } catch (_) {
-      return null;
-    }
+  Future<void> _onEditGrid() async {
+    final result = await _showGridSettingsDialog();
+    if (result == null) return;
+    setState(() {
+      _beatsPerMeasure = result.beats;
+      _scale = result.scale;
+      _basePitch = result.startFrom;
+      _octaveCount = result.octaveCount;
+    });
   }
 
-  bool _looksLikeUpdateSongJson(String raw) {
-    try {
-      final decoded = jsonDecode(raw);
-      return decoded is Map && decoded.containsKey('success') && decoded.containsKey('message');
-    } catch (_) {
-      return false;
-    }
+  Future<_GridSettings?> _showGridSettingsDialog() {
+    final beatsController = TextEditingController(text: _beatsPerMeasure.toString());
+    final startController = TextEditingController(text: _basePitch.toString());
+    final octavesController = TextEditingController(text: _octaveCount.toString());
+    ScaleType scale = _scale;
+
+    return showDialog<_GridSettings>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Grid settings'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: beatsController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Beats per measure', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<ScaleType>(
+                initialValue: scale,
+                decoration: const InputDecoration(labelText: 'Scale', border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: ScaleType.major, child: Text('Major')),
+                  DropdownMenuItem(value: ScaleType.minor, child: Text('Minor')),
+                ],
+                onChanged: (value) {
+                  scale = value ?? scale;
+                },
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: startController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Start pitch (MIDI)', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: octavesController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Octave range', border: OutlineInputBorder()),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final beats = int.tryParse(beatsController.text.trim()) ?? _beatsPerMeasure;
+                final start = int.tryParse(startController.text.trim()) ?? _basePitch;
+                final octaves = int.tryParse(octavesController.text.trim()) ?? _octaveCount;
+                Navigator.of(context).pop(_GridSettings(
+                  beats: beats > 0 ? beats : _beatsPerMeasure,
+                  scale: scale,
+                  startFrom: start.clamp(0, 127),
+                  octaveCount: octaves.clamp(1, 6),
+                ));
+              },
+              child: const Text('Apply'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
-  UpdateSongResponse? _tryParseUpdateSongResponse(String raw) {
+  Future<void> _createTrackOnServer(CreateTrackInput input) async {
+    final response = await _trackRepo.createTrack(
+      userId: widget.userId,
+      roomId: widget.roomId,
+      songId: _currentSong.id,
+      input: input,
+    );
+    if (!mounted) return;
+    if (response == null) {
+      _showSnack('Timed out creating track');
+      return;
+    }
+    if (!response.success || response.track == null) {
+      _showSnack(response.message.isNotEmpty ? response.message : 'Failed to create track');
+      return;
+    }
+    setState(() => _insertOrUpdateTrack(response.track!));
+  }
+
+  Future<void> _deleteTrackOnServer(Track track) async {
+    if (track.id.isEmpty) {
+      setState(() {
+        _tracks.remove(track);
+        _notesByTrackId.remove(track.id);
+        if (_selectedTrack >= _tracks.length) {
+          _selectedTrack = _tracks.isEmpty ? 0 : _tracks.length - 1;
+        }
+      });
+      return;
+    }
+    final response = await _trackRepo.deleteTrack(
+      userId: widget.userId,
+      roomId: widget.roomId,
+      songId: _currentSong.id,
+      trackId: track.id,
+    );
+    if (!mounted) return;
+    if (response == null) {
+      _showSnack('Timed out deleting track');
+      return;
+    }
+    if (!response.success) {
+      _showSnack(response.message.isNotEmpty ? response.message : 'Failed to delete track');
+      return;
+    }
+    setState(() => _removeTrackById(track.id));
+  }
+
+  void _handleIncomingTrackMessage(String raw) {
     try {
       final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final success = decoded['success'];
-      final message = decoded['message'];
-      final songMap = decoded['song'];
-      Song? song;
-      if (songMap is Map) {
-        song = Song.fromMap(songMap);
+      if (decoded is! Map) return;
+
+      if (_looksLikeNoteBroadcast(decoded)) {
+        return; // handled by note broadcast stream
       }
-      return UpdateSongResponse(
-        success: success is bool ? success : false,
-        message: message is String ? message : '',
-        song: song,
-      );
+
+      // Broadcasts
+      if (_looksLikeTrackBroadcast(decoded)) {
+        final songId = decoded['song_id'];
+        if (songId is String && songId != _currentSong.id) return;
+        final action = decoded['action'];
+        if (action == 'on') {
+          final trackMap = decoded['track'];
+          if (trackMap is Map) {
+            final track = Track.tryFromMap(trackMap);
+            if (track != null) {
+              setState(() => _insertOrUpdateTrack(track));
+            }
+          }
+        } else if (action == 'off') {
+          final trackId = decoded['track_id'];
+          if (trackId is String && trackId.isNotEmpty) {
+            setState(() => _removeTrackById(trackId));
+          }
+        }
+        return;
+      }
     } catch (_) {
-      return null;
+      // ignore non-JSON
+    }
+  }
+
+  bool _looksLikeTrackBroadcast(Map decoded) {
+    return decoded.containsKey('action') && (decoded.containsKey('track') || decoded.containsKey('track_id'));
+  }
+
+  bool _looksLikeNoteBroadcast(Map decoded) {
+    return decoded.containsKey('action') && decoded.containsKey('track_id') && decoded.containsKey('step') && decoded.containsKey('pitch');
+  }
+
+  void _insertOrUpdateTrack(Track track) {
+    final idx = _tracks.indexWhere((t) => t.id == track.id);
+    if (idx >= 0) {
+      _tracks[idx] = track;
+    } else {
+      _tracks.add(track);
+    }
+    _notesByTrackId.putIfAbsent(track.id, () => <String, Note>{});
+    _selectedTrack = _tracks.indexWhere((t) => t.id == track.id);
+  }
+
+  void _removeTrackById(String trackId) {
+    _tracks.removeWhere((t) => t.id == trackId);
+    _notesByTrackId.remove(trackId);
+    if (_selectedTrack >= _tracks.length) {
+      _selectedTrack = _tracks.isEmpty ? 0 : _tracks.length - 1;
+    }
+  }
+
+  void _handleNoteBroadcast(NoteBroadcast broadcast) {
+    if (broadcast.songId != _currentSong.id) return;
+    final noteMap = _notesByTrackId.putIfAbsent(broadcast.trackId, () => <String, Note>{});
+    final key = _noteKey(broadcast.step, broadcast.pitch);
+    if (broadcast.action == 'on') {
+      final note = broadcast.note ??
+          Note(
+            id: 'broadcast_$key',
+            trackId: broadcast.trackId,
+            step: broadcast.step,
+            pitch: broadcast.pitch,
+            velocity: _defaultVelocity,
+            lengthSteps: _defaultLengthSteps,
+          );
+      setState(() => noteMap[key] = note);
+    } else if (broadcast.action == 'off') {
+      setState(() => noteMap.remove(key));
     }
   }
 }
 
-class TrackIconChoice {
-  final String label;
-  final String instrument;
-  const TrackIconChoice(this.label, this.instrument);
+enum ScaleType { major, minor }
+
+const Set<int> _majorScale = {0, 2, 4, 5, 7, 9, 11};
+const Set<int> _minorScale = {0, 2, 3, 5, 7, 8, 10};
+
+class _GridSettings {
+  final int beats;
+  final ScaleType scale;
+  final int startFrom;
+  final int octaveCount;
+
+  const _GridSettings({
+    required this.beats,
+    required this.scale,
+    required this.startFrom,
+    required this.octaveCount,
+  });
 }
 
-const List<TrackIconChoice> _instrumentChoices = [
-  TrackIconChoice('Drums', 'drums'),
-  TrackIconChoice('Bass', 'bass'),
-  TrackIconChoice('Lead', 'lead'),
-  TrackIconChoice('Pad', 'pad'),
-  TrackIconChoice('Pluck', 'pluck'),
-  TrackIconChoice('Keys', 'keys'),
-];
-
-class TrackColorChoice {
-  final String label;
-  final String colorName;
-  const TrackColorChoice(this.label, this.colorName);
-}
-
-const List<TrackColorChoice> _trackColors = [
-  TrackColorChoice('Blue', 'blue'),
-  TrackColorChoice('Teal', 'teal'),
-  TrackColorChoice('Purple', 'purple'),
-  TrackColorChoice('Pink', 'pink'),
-  TrackColorChoice('Orange', 'orange'),
-  TrackColorChoice('Green', 'green'),
-];
-
-IconData _iconForInstrument(String instrument) {
-  switch (instrument) {
-    case 'drums':
-      return Icons.music_note;
-    case 'bass':
-      return Icons.piano;
-    case 'lead':
-      return Icons.audiotrack;
-    case 'pad':
-      return Icons.graphic_eq;
-    case 'pluck':
-      return Icons.queue_music;
-    case 'keys':
-      return Icons.keyboard;
-    default:
-      return Icons.music_video;
-  }
-}
-
-class Track {
-  final String name;
-  final String instrument;
-  final String color; // stored as a text-friendly name for persistence
-  final int? channel;
-  const Track({required this.name, required this.instrument, required this.color, this.channel});
-}
-
-class UpdateSongInput {
-  final String? title;
-  final int? bpm;
-  final int? steps;
-
-  const UpdateSongInput({this.title, this.bpm, this.steps});
-}
-
-class UpdateSongResponse {
-  final bool success;
-  final String message;
-  final Song? song;
-
-  const UpdateSongResponse({required this.success, required this.message, required this.song});
-}
-
-Color _colorForName(String name) {
-  switch (name) {
-    case 'blue':
-      return Colors.blue;
-    case 'teal':
-      return Colors.teal;
-    case 'purple':
-      return Colors.purple;
-    case 'pink':
-      return Colors.pink;
-    case 'orange':
-      return Colors.orange;
-    case 'green':
-      return Colors.green;
-    default:
-      return Colors.grey;
-  }
-}

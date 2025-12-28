@@ -293,8 +293,8 @@ class _SongListPageState extends State<SongListPage> {
     }
   }
 
-  void _openSong(Song song) {
-    Navigator.of(context).push(
+  Future<void> _openSong(Song song) async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => MusicMakerPage(
           song: song,
@@ -305,6 +305,9 @@ class _SongListPageState extends State<SongListPage> {
         ),
       ),
     );
+    if (mounted) {
+      _fetchSongs();
+    }
   }
 
   Future<String?> _waitForSongListResponse() async {
