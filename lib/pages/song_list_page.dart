@@ -94,7 +94,7 @@ class _SongListPageState extends State<SongListPage> {
         return ListTile(
           leading: const Icon(Icons.music_note_outlined),
           title: Text(song.title),
-          subtitle: Text('BPM ${song.bpm} • ${song.steps} steps'),
+          subtitle: Text('BPM ${song.bpm} • ${song.steps} steps • ${song.beatsPerMeasure} beats • ${song.scale}'),
           onTap: () => _openSong(song),
         );
       },

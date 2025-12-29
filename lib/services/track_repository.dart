@@ -193,7 +193,10 @@ class TrackRepository {
   }
 
   bool _looksLikeListNotesJson(Map<String, dynamic> json) {
-    return json.containsKey('success') && json.containsKey('message') && (json.containsKey('notes') || json.containsKey('tracks'));
+    // Some servers return only success/message when no notes/tracks; accept that too.
+    final hasBase = json.containsKey('success') && json.containsKey('message');
+    final hasPayload = json.containsKey('notes') || json.containsKey('tracks');
+    return hasBase && (json['success'] == true || hasPayload);
   }
 
   bool _looksLikeDeleteTrackJson(Map<String, dynamic> json) {

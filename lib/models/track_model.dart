@@ -223,8 +223,20 @@ class UpdateSongInput {
   final String? title;
   final int? bpm;
   final int? steps;
+  final int? beatsPerMeasure;
+  final String? scale;
+  final int? startPitch;
+  final int? octaveRange;
 
-  const UpdateSongInput({this.title, this.bpm, this.steps});
+  const UpdateSongInput({
+    this.title,
+    this.bpm,
+    this.steps,
+    this.beatsPerMeasure,
+    this.scale,
+    this.startPitch,
+    this.octaveRange,
+  });
 }
 
 class UpdateSongResponse {

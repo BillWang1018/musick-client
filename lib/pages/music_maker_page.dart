@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:vector_math/vector_math_64.dart' as vm;
 
 import '../models/song_model.dart';
 import '../models/track_model.dart';
@@ -48,8 +49,14 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   final Map<String, Map<String, Note>> _notesByTrackId = {};
   late Song _currentSong;
   late final TrackRepository _trackRepo;
+  late final TransformationController _transformController;
+  Timer? _playTimer;
   int _selectedTrack = 0;
+  bool _showAllTracks = false;
+  int _playheadStep = 0;
+  bool _isPlaying = false;
   String _lastTapInfo = 'Tap a note to debug.';
+  Size _viewportSize = Size.zero;
   StreamSubscription<String>? _trackSub;
   StreamSubscription<NoteBroadcast>? _noteBroadcastSub;
 
@@ -57,7 +64,9 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   void initState() {
     super.initState();
     _currentSong = widget.song;
+    _applySongSettings(_currentSong);
     _trackRepo = TrackRepository(widget.socketService);
+    _transformController = TransformationController();
     _trackSub = widget.socketService.messages.listen(_handleIncomingTrackMessage);
     _noteBroadcastSub = _trackRepo.noteBroadcasts(songId: widget.song.id).listen(_handleNoteBroadcast);
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadInitialNotesAndTracks());
@@ -65,6 +74,8 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
 
   @override
   void dispose() {
+    _playTimer?.cancel();
+    _transformController.dispose();
     _noteBroadcastSub?.cancel();
     _trackSub?.cancel();
     super.dispose();
@@ -102,9 +113,16 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     });
   }
 
+  void _applySongSettings(Song song) {
+    _beatsPerMeasure = song.beatsPerMeasure > 0 ? song.beatsPerMeasure : _defaultBeatsPerMeasure;
+    _basePitch = song.startPitch.clamp(0, 127).toInt();
+    _octaveCount = song.octaveRange.clamp(1, 6).toInt();
+    _scale = _scaleFromString(song.scale);
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_selectedTrack >= _tracks.length) {
+    if (!_showAllTracks && _selectedTrack >= _tracks.length) {
       _selectedTrack = _tracks.isEmpty ? 0 : _tracks.length - 1;
     }
     final pitches = List<int>.generate(_octaveSpan * _octaveCount, (i) => _basePitch + i);
@@ -114,6 +132,11 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       appBar: AppBar(
         title: Text(_currentSong.title),
         actions: [
+          IconButton(
+            icon: Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_fill),
+            tooltip: _isPlaying ? 'Pause' : 'Play',
+            onPressed: _togglePlayback,
+          ),
           IconButton(
             icon: const Icon(Icons.grid_on),
             tooltip: 'Grid settings',
@@ -135,7 +158,8 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                 const SizedBox(width: 12),
                 Text('BPM ${_currentSong.bpm}'),
                 const SizedBox(width: 12),
-                Text('Steps $steps'),
+                Text('Step ${(_playheadStep + 1).clamp(1, steps)} / $steps'),
+                const SizedBox(width: 12),
               ],
             ),
           ),
@@ -144,18 +168,37 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       body: Column(
         children: [
           Expanded(
-            child: _tracks.isEmpty
-                ? _buildEmptyTracksPlaceholder()
-                : InteractiveViewer(
-                    minScale: 0.6,
-                    maxScale: 2.0,
-                    constrained: false,
-                    child: SizedBox(
-                      width: steps * _cellSize,
-                      height: pitches.length * _cellSize,
-                      child: _buildGrid(pitches, steps),
-                    ),
-                  ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                _viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
+                return _tracks.isEmpty
+                    ? _buildEmptyTracksPlaceholder()
+                    : Stack(
+                        children: [
+                          InteractiveViewer(
+                            transformationController: _transformController,
+                            minScale: 0.6,
+                            maxScale: 2.0,
+                            constrained: false,
+                            boundaryMargin: _boundaryMargin(),
+                            child: SizedBox(
+                              width: steps * _cellSize,
+                              height: pitches.length * _cellSize,
+                              child: _buildGrid(pitches, steps),
+                            ),
+                          ),
+                          IgnorePointer(
+                            child: Center(
+                              child: Container(
+                                width: 2,
+                                color: Colors.redAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+              },
+            ),
           ),
           const Divider(height: 1),
           _buildTracks(),
@@ -181,41 +224,62 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     if (_tracks.isEmpty) {
       return const SizedBox.shrink();
     }
-    final trackIndex = _selectedTrack.clamp(0, _tracks.length - 1);
-    final track = _tracks[trackIndex];
-    final notes = _notesByTrackId.putIfAbsent(track.id, () => <String, Note>{});
-    int beatLength = _beatsPerMeasure <= 0 ? _currentSong.steps : (_currentSong.steps / _beatsPerMeasure).round();
-    if (beatLength < 1) beatLength = 1;
-    if (beatLength > _currentSong.steps) beatLength = _currentSong.steps;
+    Map<String, Note>? selectedNotes;
+    Color? selectedTrackColor;
+    if (!_showAllTracks) {
+      final trackIndex = _selectedTrack.clamp(0, _tracks.length - 1);
+      final track = _tracks[trackIndex];
+      selectedNotes = _notesByTrackId.putIfAbsent(track.id, () => <String, Note>{});
+      selectedTrackColor = colorForName(track.color);
+    }
     return Column(
       children: List.generate(pitches.length, (rowIdx) {
         final pitch = pitches[pitches.length - 1 - rowIdx]; // top is highest pitch
-        final isSharp = _isSharp(pitch);
+        // final isSharp = _isSharp(pitch);
         final isScaleTone = _isScaleTone(pitch);
         final octaveBoundary = pitch % _octaveSpan == 0; // C boundary
         return Row(
           children: List.generate(steps, (colIdx) {
             final key = _noteKey(colIdx, pitch);
-            final isActive = notes.containsKey(key);
-            final beatBoundary = colIdx % beatLength == 0;
-            final trackColor = colorForName(track.color);
+            final measureBoundary = _beatsPerMeasure > 0 ? colIdx % _beatsPerMeasure == 0 : false;
+
+            bool isActive = false;
+            Color? activeColor;
+            if (_showAllTracks) {
+              final overlapColors = <Color>[];
+              for (final track in _tracks) {
+                final noteMap = _notesByTrackId[track.id];
+                if (noteMap != null && noteMap.containsKey(key)) {
+                  isActive = true;
+                  overlapColors.add(colorForName(track.color).withValues(alpha: 0.6));
+                }
+              }
+              if (overlapColors.isNotEmpty) {
+                activeColor = _mixColorsMultiply(overlapColors);
+              }
+            } else {
+              isActive = selectedNotes?.containsKey(key) == true;
+              if (isActive && selectedTrackColor != null) {
+                activeColor = selectedTrackColor.withValues(alpha: 0.65);
+              }
+            }
+
             final baseColor = isActive
-              ? trackColor.withValues(alpha: (trackColor.a * 0.65).clamp(0.0, 1.0))
-              : (isScaleTone
-                ? Colors.amber.shade50
-                : (isSharp ? Colors.blueGrey.shade50 : Colors.white));
+                ? activeColor ?? Colors.grey.shade200
+                : (isScaleTone ? const Color.fromARGB(255, 247, 255, 225) : Colors.white);
+                // : (isSharp ? Colors.blueGrey.shade50 : Colors.white));
             return GestureDetector(
-              onTap: () => _handleTap(step: colIdx, pitch: pitch),
+              onTap: _showAllTracks ? null : () => _handleTap(step: colIdx, pitch: pitch),
               child: Container(
                 width: _cellSize,
                 height: _cellSize,
                 decoration: BoxDecoration(
                   color: baseColor,
                   border: Border(
-                    top: BorderSide(color: Colors.grey.shade300, width: octaveBoundary ? 1.2 : 0.5),
-                    left: BorderSide(color: Colors.grey.shade400, width: beatBoundary ? 1.5 : 0.5),
+                    top: BorderSide(color: Colors.grey.shade200, width: 0.3),
+                    left: BorderSide(color: Colors.grey.shade500, width: measureBoundary ? 3.0 : 0.5),
                     right: BorderSide(color: Colors.grey.shade200, width: 0.3),
-                    bottom: BorderSide(color: Colors.grey.shade200, width: 0.3),
+                    bottom: BorderSide(color: Colors.grey.shade400, width: octaveBoundary ? 3.0 : 0.6),
                   ),
                 ),
               ),
@@ -226,6 +290,23 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     );
   }
 
+  Color _mixColorsMultiply(List<Color> colors) {
+    if (colors.isEmpty) return Colors.transparent;
+    double r = 1.0, g = 1.0, b = 1.0, a = 1.0;
+    for (final c in colors) {
+      r *= c.r;
+      g *= c.g;
+      b *= c.b;
+      a *= c.a;
+    }
+    return Color.fromRGBO(
+      (r.clamp(0.0, 1.0) * 255).round(),
+      (g.clamp(0.0, 1.0) * 255).round(),
+      (b.clamp(0.0, 1.0) * 255).round(),
+      a.clamp(0.0, 1.0),
+    );
+  }
+
   Widget _buildTracks() {
     return SizedBox(
       height: 88,
@@ -233,23 +314,45 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         itemBuilder: (context, index) {
-          if (index == _tracks.length) {
+          if (index == 0) {
+            final selected = _showAllTracks;
+            return GestureDetector(
+              onTap: () => setState(() {
+                _showAllTracks = true;
+              }),
+              child: Column(
+                children: [
+                  CircleAvatar(
+                    radius: 26,
+                    backgroundColor: selected ? Colors.blueGrey.shade100 : Colors.grey.shade200,
+                    child: Icon(Icons.layers, color: selected ? Colors.blueGrey : Colors.grey.shade700),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text('All', style: TextStyle(fontSize: 12)),
+                ],
+              ),
+            );
+          }
+          if (index == _tracks.length + 1) {
             return _buildAddTrackButton();
           }
-          final track = _tracks[index];
-          final selected = index == _selectedTrack;
+          final trackIndex = index - 1;
+          final track = _tracks[trackIndex];
+          final selected = !_showAllTracks && trackIndex == _selectedTrack;
           return GestureDetector(
-            onTap: () => setState(() => _selectedTrack = index),
-            onLongPress: () => _confirmDeleteTrack(index),
+            onTap: () => setState(() {
+              _showAllTracks = false;
+              _selectedTrack = trackIndex;
+            }),
+            onLongPress: () => _confirmDeleteTrack(trackIndex),
             child: Column(
               children: [
                 CircleAvatar(
                   radius: 26,
-                          backgroundColor:
-                              selected ? colorForName(track.color).withValues(alpha: 0.25) : Colors.grey.shade200,
+                  backgroundColor: selected ? colorForName(track.color).withValues(alpha: 0.25) : Colors.grey.shade200,
                   child: Icon(
-                            iconForInstrument(track.instrument),
-                            color: selected ? colorForName(track.color) : Colors.grey.shade700,
+                    iconForInstrument(track.instrument),
+                    color: selected ? colorForName(track.color) : Colors.grey.shade700,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -259,7 +362,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
           );
         },
         separatorBuilder: (_, _) => const SizedBox(width: 12),
-        itemCount: _tracks.length + 1,
+        itemCount: _tracks.length + 2,
       ),
     );
   }
@@ -282,6 +385,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   }
 
   Future<void> _handleTap({required int step, required int pitch}) async {
+    if (_showAllTracks) return; // read-only in All mode
     if (_tracks.isEmpty) return;
     if (_selectedTrack >= _tracks.length) {
       _selectedTrack = _tracks.length - 1;
@@ -347,11 +451,11 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     }
   }
 
-  bool _isSharp(int pitch) {
-    // pitch 1 = C0, so mod 12 gives chroma; sharps at 2,4,7,9,11.
-    final chroma = pitch % 12;
-    return chroma == 2 || chroma == 4 || chroma == 7 || chroma == 9 || chroma == 11;
-  }
+  // bool _isSharp(int pitch) {
+  //   // pitch 1 = C1, so mod 12 gives chroma; sharps at 2,4,7,9,11.
+  //   final chroma = pitch % 12;
+  //   return chroma == 2 || chroma == 4 || chroma == 7 || chroma == 9 || chroma == 11;
+  // }
 
   bool _isScaleTone(int pitch) {
     final chroma = pitch % 12;
@@ -359,6 +463,115 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   }
 
   String _noteKey(int step, int pitch) => '$step:$pitch';
+
+  int _stepAtCenter() {
+    final scale = _currentScale();
+    if (scale == 0 || _viewportSize.width == 0) return 0;
+    final translation = _transformController.value.getTranslation();
+    final centerX = _viewportSize.width / 2;
+    final worldX = (centerX - translation.x) / scale;
+    final step = worldX ~/ _cellSize;
+    return step.clamp(0, _currentSong.steps - 1);
+  }
+
+  double _currentScale() {
+    // Matrix4 stores uniform scale on [0].
+    return _transformController.value.storage[0];
+  }
+
+  EdgeInsets _boundaryMargin() {
+    // Allow panning so the first/last notes can be centered.
+    final horizontal = (_viewportSize.width * 0.6).clamp(120, 800);
+    final vertical = (_viewportSize.height * 0.2).clamp(60, 400);
+    return EdgeInsets.symmetric(horizontal: horizontal.toDouble(), vertical: vertical.toDouble());
+  }
+
+  void _scrollToStep(int step) {
+    if (_viewportSize.width == 0) return;
+    final scale = _currentScale();
+    final targetX = (step + 0.5) * _cellSize * scale;
+    final centerX = _viewportSize.width / 2;
+    final translation = _transformController.value.getTranslation();
+    final nextMatrix = _transformController.value.clone()
+      ..setTranslation(vm.Vector3(centerX - targetX, translation.y, 0));
+    _transformController.value = nextMatrix;
+  }
+
+  void _togglePlayback() {
+    if (_isPlaying) {
+      _pausePlayback();
+      return;
+    }
+    if (_currentSong.steps <= 0) {
+      _showSnack('No steps to play');
+      return;
+    }
+    _playheadStep = _stepAtCenter();
+    _isPlaying = true;
+    _scrollToStep(_playheadStep);
+    _announceStep(_playheadStep);
+    final beatMs = (60000 / (_currentSong.bpm <= 0 ? 120 : _currentSong.bpm)).round();
+    _playTimer?.cancel();
+    _playTimer = Timer.periodic(Duration(milliseconds: beatMs), (_) => _advancePlayhead());
+    setState(() {});
+  }
+
+  void _advancePlayhead() {
+    if (!mounted || !_isPlaying) return;
+    final nextStep = _playheadStep + 1;
+    if (nextStep >= _currentSong.steps) {
+      _stopAtEnd();
+      return;
+    }
+    setState(() {
+      _playheadStep = nextStep;
+    });
+    _scrollToStep(_playheadStep);
+    _announceStep(_playheadStep);
+  }
+
+  void _announceStep(int step) {
+    final playing = _playingNotesAtStep(step);
+    final pitchList = playing.isEmpty ? 'no notes' : 'pitches ${playing.map((n) => n.pitch).join(', ')}';
+    setState(() {
+      _lastTapInfo = 'Playing step ${step + 1}/${_currentSong.steps}: $pitchList';
+    });
+  }
+
+  List<Note> _playingNotesAtStep(int step) {
+    final result = <Note>[];
+    _notesByTrackId.forEach((_, noteMap) {
+      for (final note in noteMap.values) {
+        final start = note.step;
+        final end = note.step + (note.lengthSteps <= 0 ? 1 : note.lengthSteps);
+        if (step >= start && step < end) {
+          result.add(note);
+        }
+      }
+    });
+    return result;
+  }
+
+  void _pausePlayback() {
+    _playTimer?.cancel();
+    _playTimer = null;
+    if (!mounted) return;
+    setState(() {
+      _isPlaying = false;
+    });
+  }
+
+  void _stopAtEnd() {
+    _playTimer?.cancel();
+    _playTimer = null;
+    if (!mounted) return;
+    final lastIndex = _currentSong.steps > 0 ? _currentSong.steps - 1 : 0;
+    setState(() {
+      _isPlaying = false;
+      _playheadStep = lastIndex;
+      _lastTapInfo = 'Reached end at step ${_currentSong.steps}.';
+    });
+  }
 
   Widget _buildEmptyTracksPlaceholder() {
     return Center(
@@ -552,25 +765,36 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     if (!mounted) return;
     if (response == null) {
       _showSnack('Timed out updating song');
+      setState(() => _applySongSettings(_currentSong));
       return;
     }
     if (!response.success) {
       _showSnack(response.message.isNotEmpty ? response.message : 'Failed to update song');
+      setState(() => _applySongSettings(_currentSong));
       return;
     }
 
     if (response.song != null) {
       setState(() {
         _currentSong = response.song!;
+        _applySongSettings(_currentSong);
       });
     } else {
       setState(() {
         _currentSong = Song(
           id: _currentSong.id,
+          roomId: _currentSong.roomId,
           title: result.title?.isNotEmpty == true ? result.title! : _currentSong.title,
           bpm: result.bpm ?? _currentSong.bpm,
           steps: result.steps ?? _currentSong.steps,
+          beatsPerMeasure: _currentSong.beatsPerMeasure,
+          scale: _currentSong.scale,
+          startPitch: _currentSong.startPitch,
+          octaveRange: _currentSong.octaveRange,
+          createdBy: _currentSong.createdBy,
+          createdAt: _currentSong.createdAt,
         );
+        _applySongSettings(_currentSong);
       });
     }
   }
@@ -644,6 +868,68 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       _basePitch = result.startFrom;
       _octaveCount = result.octaveCount;
     });
+    await _persistGridSettings(result);
+  }
+
+  Future<void> _persistGridSettings(_GridSettings settings) async {
+    final updates = <String, dynamic>{
+      'user_id': widget.userId,
+      'room_id': widget.roomId,
+      'song_id': _currentSong.id,
+    };
+
+    if (settings.beats != _currentSong.beatsPerMeasure) {
+      updates['beats_per_measure'] = settings.beats;
+    }
+    final scaleString = _scaleToString(settings.scale);
+    if (scaleString != _currentSong.scale) {
+      updates['scale'] = scaleString;
+    }
+    if (settings.startFrom != _currentSong.startPitch) {
+      updates['start_pitch'] = settings.startFrom;
+    }
+    if (settings.octaveCount != _currentSong.octaveRange) {
+      updates['octave_range'] = settings.octaveCount;
+    }
+
+    // If no changes, stop here.
+    if (updates.length <= 3) {
+      return;
+    }
+
+    final response = await _trackRepo.updateSong(updates: updates);
+    if (!mounted) return;
+    if (response == null) {
+      _showSnack('Timed out updating song');
+      setState(() => _applySongSettings(_currentSong));
+      return;
+    }
+    if (!response.success) {
+      _showSnack(response.message.isNotEmpty ? response.message : 'Failed to update song');
+      setState(() => _applySongSettings(_currentSong));
+      return;
+    }
+
+    setState(() {
+      if (response.song != null) {
+        _currentSong = response.song!;
+      } else {
+        _currentSong = Song(
+          id: _currentSong.id,
+          roomId: _currentSong.roomId,
+          title: _currentSong.title,
+          bpm: _currentSong.bpm,
+          steps: _currentSong.steps,
+          beatsPerMeasure: settings.beats,
+          scale: scaleString,
+          startPitch: settings.startFrom,
+          octaveRange: settings.octaveCount,
+          createdBy: _currentSong.createdBy,
+          createdAt: _currentSong.createdAt,
+        );
+      }
+      _applySongSettings(_currentSong);
+    });
   }
 
   Future<_GridSettings?> _showGridSettingsDialog() {
@@ -704,8 +990,8 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
                 Navigator.of(context).pop(_GridSettings(
                   beats: beats > 0 ? beats : _beatsPerMeasure,
                   scale: scale,
-                  startFrom: start.clamp(0, 127),
-                  octaveCount: octaves.clamp(1, 6),
+                  startFrom: start.clamp(0, 127).toInt(),
+                  octaveCount: octaves.clamp(1, 6).toInt(),
                 ));
               },
               child: const Text('Apply'),
@@ -805,6 +1091,24 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
 
   bool _looksLikeNoteBroadcast(Map decoded) {
     return decoded.containsKey('action') && decoded.containsKey('track_id') && decoded.containsKey('step') && decoded.containsKey('pitch');
+  }
+
+  ScaleType _scaleFromString(String value) {
+    switch (value.toLowerCase()) {
+      case 'minor':
+        return ScaleType.minor;
+      default:
+        return ScaleType.major;
+    }
+  }
+
+  String _scaleToString(ScaleType value) {
+    switch (value) {
+      case ScaleType.minor:
+        return 'minor';
+      case ScaleType.major:
+        return 'major';
+    }
   }
 
   void _insertOrUpdateTrack(Track track) {
