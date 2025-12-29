@@ -3,76 +3,60 @@ import '../models/message_model.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message message;
+  // 配合聊天室功能的參數
+  final void Function(int seconds)? onJumpToTimestamp;
+  final int? Function(String text)? extractTimestampSeconds;
 
   const MessageBubble({
     super.key,
     required this.message,
+    this.onJumpToTimestamp,
+    this.extractTimestampSeconds,
   });
 
   @override
   Widget build(BuildContext context) {
+    // --- 這裡改回使用原本的變數名稱 ---
+    final isUser = message.isFromUser; // 改用 isFromUser
+    final isShazam = message.senderName == 'Shazam'; // 改用 senderName
+
     return Align(
-      alignment: message.isFromUser ? Alignment.centerRight : Alignment.centerLeft,
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+        decoration: BoxDecoration(
+          color: isShazam 
+              ? Colors.indigo.shade100 // Shazam 訊息顯示靛藍色
+              : (isUser ? Colors.blue.shade100 : Colors.grey.shade300),
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(12),
+            topRight: const Radius.circular(12),
+            bottomLeft: isUser ? const Radius.circular(12) : Radius.zero,
+            bottomRight: isUser ? Radius.zero : const Radius.circular(12),
+          ),
+        ),
         child: Column(
-          crossAxisAlignment:
-              message.isFromUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
+            if (!isUser)
+              Text(
+                message.senderName, // 改用 senderName
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey[800],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            if (!isUser) const SizedBox(height: 4),
             Text(
-              message.senderName,
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade700,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: message.isFromUser ? Colors.blue : Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Flexible(
-                    child: Text(
-                      message.content,
-                      style: TextStyle(
-                        color: message.isFromUser ? Colors.white : Colors.black,
-                      ),
-                    ),
-                  ),
-                  if (message.isFromUser)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 6),
-                      child: Icon(
-                        message.delivered ? Icons.check_circle : Icons.check_circle_outline,
-                        size: 16,
-                        color: message.delivered ? Colors.greenAccent : Colors.white70,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _formatTime(message.timestamp),
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.grey.shade600,
-              ),
+              message.content,
+              style: const TextStyle(fontSize: 16),
             ),
           ],
         ),
       ),
     );
-  }
-
-  String _formatTime(DateTime time) {
-    return '${time.hour}:${time.minute.toString().padLeft(2, '0')}';
   }
 }

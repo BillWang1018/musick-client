@@ -1,9 +1,15 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
-
+import 'package:provider/provider.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
+import '../services/socket_service.dart';
 import '../models/message_model.dart';
 import 'message_bubble.dart';
 
-class RoomChatContent extends StatelessWidget {
+class RoomChatContent extends StatefulWidget {
   final List<Message> messages;
   final ScrollController scrollController;
   final TextEditingController textController;
@@ -30,92 +36,214 @@ class RoomChatContent extends StatelessWidget {
   });
 
   @override
+  State<RoomChatContent> createState() => _RoomChatContentState();
+}
+
+class _RoomChatContentState extends State<RoomChatContent> {
+  bool _isRecognizing = false;
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  late SocketService _socketService; 
+
+  @override
+  void initState() {
+    super.initState();
+    _socketService = context.read<SocketService>();
+    _socketService.addListener(_handleShazamResult);
+  }
+
+  @override
+  void dispose() {
+    _socketService.removeListener(_handleShazamResult);
+    _audioRecorder.dispose();
+    super.dispose();
+  }
+
+  // --- 核心邏輯：收到辨識結果後，模擬使用者發送訊息 ---
+  void _handleShazamResult() {
+    final result = _socketService.lastShazamResult;
+
+    if (result != null && result['success'] == true) {
+      final track = result['result']['track'];
+
+      if (track != null) {
+        final title = track['title'] ?? '未知歌名';
+        final artist = track['subtitle'] ?? '未知歌手';
+        
+        final String messageText = "🎵 我剛剛辨識到了這首歌：\n$title - $artist";
+
+        if (mounted) {
+          widget.textController.text = messageText;
+          widget.onSend();
+        }
+      }
+      _socketService.clearShazamResult();
+      
+    } else if (result != null && result['success'] == false) {
+       if (mounted) {
+         _showSnackBar('辨識失敗: ${result['message']}');
+       }
+       _socketService.clearShazamResult();
+    }
+  }
+
+  // --- 功能 A: 檔案選取辨識 (保留此功能) ---
+  Future<void> _handleFilePickAndIdentify(BuildContext context) async {
+    final socketService = context.read<SocketService>();
+    if (!socketService.isConnected) {
+      _showSnackBar('尚未連線到伺服器');
+      return;
+    }
+
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom, 
+        allowedExtensions: ['wav'], 
+      );
+
+      if (result != null && result.files.single.path != null) {
+        final file = File(result.files.single.path!);
+        
+        if (!file.path.toLowerCase().endsWith('.wav')) {
+          _showSnackBar('格式錯誤：僅支援 WAV 檔案');
+          return;
+        }
+
+        final int sizeInBytes = await file.length();
+        const int maxSizeBytes = 2 * 1024 * 1024; // 2MB
+
+        if (sizeInBytes > maxSizeBytes) {
+          _showSnackBar('檔案過大：請上傳小於 2MB 的 WAV 檔案');
+          return;
+        }
+
+        setState(() => _isRecognizing = true);
+        final bytes = await file.readAsBytes();
+        String base64Audio = base64Encode(bytes);
+        
+        await socketService.identifyMusic(base64Audio);
+        _showSnackBar('檔案已送出辨識...');
+      }
+    } catch (e) {
+      _showSnackBar('讀取檔案失敗: $e');
+    } finally {
+      if (mounted) setState(() => _isRecognizing = false);
+    }
+  }
+
+  // --- 功能 B: 錄音辨識 (邏輯保留，但按鈕已隱藏) ---
+  Future<void> _handleMusicIdentify(BuildContext context) async {
+    final socketService = context.read<SocketService>();
+    if (!socketService.isConnected) {
+      _showSnackBar('尚未連線到伺服器');
+      return;
+    }
+
+    if (!await _audioRecorder.hasPermission()) {
+      _showSnackBar('需要麥克風權限');
+      return;
+    }
+
+    setState(() => _isRecognizing = true);
+    try {
+      final directory = await getTemporaryDirectory();
+      final String path = '${directory.path}/shazam_${DateTime.now().millisecondsSinceEpoch}.m4a'; 
+
+      const config = RecordConfig(
+        encoder: AudioEncoder.wav,
+        sampleRate: 44100,
+        numChannels: 1, 
+      );
+
+      await _audioRecorder.start(config, path: path);
+      _showSnackBar('正在聆聽音樂 (6秒)...');
+
+      await Future.delayed(const Duration(seconds: 6));
+
+      if (await _audioRecorder.isRecording()) {
+        final String? finalPath = await _audioRecorder.stop();
+        if (finalPath != null && mounted) {
+          final bytes = await File(finalPath).readAsBytes();
+          print("錄音大小: ${bytes.length} bytes");
+
+          String base64Audio = base64Encode(bytes);
+          await socketService.identifyMusic(base64Audio);
+        }
+      }
+    } catch (e) {
+      _showSnackBar('錄音出錯: $e');
+    } finally {
+      if (mounted) setState(() => _isRecognizing = false);
+    }
+  }
+
+  void _showSnackBar(String msg) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        if (status.isNotEmpty)
+        if (widget.status.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(8),
-            child: Text(status, textAlign: TextAlign.center),
+            child: Text(widget.status, textAlign: TextAlign.center),
           ),
+
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.all(12),
-            controller: scrollController,
-            itemCount: messages.length,
+            controller: widget.scrollController,
+            itemCount: widget.messages.length,
             itemBuilder: (context, index) {
-              final message = messages[index];
-              final tsSeconds = extractTimestampSeconds?.call(message.content);
-              final canJump = youtubeUrl != null && onJumpToTimestamp != null;
-              return Column(
-                crossAxisAlignment:
-                    message.isFromUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                children: [
-                  MessageBubble(message: message),
-                  if (canJump && tsSeconds != null)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: TextButton.icon(
-                        onPressed: () => onJumpToTimestamp?.call(tsSeconds),
-                        icon: const Icon(Icons.fast_forward),
-                        label: Text('Jump to ${_formatTs(tsSeconds)}'),
-                      ),
-                    ),
-                ],
+              return MessageBubble(
+                message: widget.messages[index],
+                onJumpToTimestamp: widget.onJumpToTimestamp,
+                extractTimestampSeconds: widget.extractTimestampSeconds,
               );
             },
           ),
         ),
-        if (youtubeUrl != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Open YouTube: $youtubeUrl',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: onOpenYoutube,
-                  icon: const Icon(Icons.ondemand_video),
-                  label: const Text('Open in player'),
-                ),
-              ],
-            ),
-          ),
+
         SafeArea(
-          top: false,
           child: Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(8.0),
             child: Row(
               children: [
+                // 檔案選取按鈕 (保留)
+                IconButton(
+                  icon: const Icon(Icons.attach_file, color: Colors.orange),
+                  onPressed: _isRecognizing ? null : () => _handleFilePickAndIdentify(context),
+                ),
+                
+                // --- 錄音按鈕已隱藏 (邏輯保留) ---
+                /*
+                IconButton(
+                  icon: _isRecognizing
+                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.mic, color: Colors.blue),
+                  onPressed: _isRecognizing ? null : () => _handleMusicIdentify(context),
+                ),
+                */
+                
                 Expanded(
                   child: TextField(
-                    controller: textController,
-                    enabled: !sending,
+                    controller: widget.textController,
+                    enabled: !widget.sending,
                     decoration: InputDecoration(
                       hintText: 'Type a message...',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                      ),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                     ),
-                    onSubmitted: (_) => onSend(),
+                    onSubmitted: (_) => widget.onSend(),
                   ),
                 ),
                 const SizedBox(width: 8),
                 FloatingActionButton(
-                  onPressed: sending ? null : onSend,
+                  onPressed: widget.sending ? null : widget.onSend,
                   mini: true,
-                  child: sending
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
+                  child: widget.sending
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                       : const Icon(Icons.send),
                 ),
               ],
@@ -125,14 +253,4 @@ class RoomChatContent extends StatelessWidget {
       ],
     );
   }
-}
-
-String _formatTs(int seconds) {
-  final hours = seconds ~/ 3600;
-  final minutes = (seconds % 3600) ~/ 60;
-  final secs = seconds % 60;
-  if (hours > 0) {
-    return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-  }
-  return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
 }
