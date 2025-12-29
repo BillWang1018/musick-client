@@ -55,6 +55,18 @@ class ListRoomsResponse {
   });
 }
 
+class FindRoomsResponse {
+  final bool success;
+  final String message;
+  final List<RoomSummary> rooms;
+
+  const FindRoomsResponse({
+    required this.success,
+    required this.message,
+    required this.rooms,
+  });
+}
+
 class JoinRoomResponse {
   final bool success;
   final String message;
@@ -74,6 +86,16 @@ class JoinRoomResponse {
     required this.ownerId,
     required this.isPrivate,
     required this.createdAt,
+  });
+}
+
+class LeaveRoomResponse {
+  final bool success;
+  final String message;
+
+  const LeaveRoomResponse({
+    required this.success,
+    required this.message,
   });
 }
 

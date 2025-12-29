@@ -26,7 +26,12 @@ class RoomListPage extends StatefulWidget {
 class _RoomListPageState extends State<RoomListPage> {
   final Logger _logger = Logger();
   final List<RoomSummary> _rooms = [];
-  String _status = '';
+  bool _loadingRooms = false;
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
 
   @override
   void initState() {
@@ -56,28 +61,24 @@ class _RoomListPageState extends State<RoomListPage> {
 
     _logger.i('Creating room (route 201): $payload');
 
-    setState(() {
-      _status = 'Creating room...';
-    });
-
     widget.socketService.sendToRoute(201, payload);
 
     final raw = await _waitForCreateRoomResponse(timeout: const Duration(seconds: 8));
     if (!mounted) return;
 
     if (raw == null) {
-      setState(() => _status = 'No create-room response received.');
+      _showSnack('No create-room response received.');
       return;
     }
 
     final resp = _tryParseCreateRoomResponse(raw);
     if (resp == null) {
-      setState(() => _status = 'Invalid create-room response: $raw');
+      _showSnack('Invalid create-room response');
       return;
     }
 
     if (!resp.success) {
-      setState(() => _status = resp.message.isEmpty ? 'Create room failed.' : resp.message);
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Create room failed.');
       return;
     }
 
@@ -90,7 +91,6 @@ class _RoomListPageState extends State<RoomListPage> {
           roomCode: resp.roomCode,
         ),
       );
-      _status = resp.message.isNotEmpty ? resp.message : 'Room created.';
     });
   }
 
@@ -162,56 +162,65 @@ class _RoomListPageState extends State<RoomListPage> {
             onPressed: _fetchRooms,
             icon: const Icon(Icons.refresh),
           ),
-          TextButton(
-            onPressed: _joinRoomDialog,
-            child: const Text('Join room'),
-          ),
-          TextButton(
-            onPressed: _createRoomDialog,
-            child: const Text('New room'),
-          ),
         ],
       ),
       body: Column(
         children: [
-          if (_status.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                _status,
-                textAlign: TextAlign.center,
-              ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: _joinRoomDialog,
+                  child: const Text('Join room'),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: _findRoomDialog,
+                  child: const Text('Find room'),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: _createRoomDialog,
+                  child: const Text('New room'),
+                ),
+              ],
             ),
+          ),
           Expanded(
-            child: _rooms.isEmpty
-                ? const Center(child: Text('No rooms yet'))
-                : ListView.separated(
-                    itemCount: _rooms.length,
-                    separatorBuilder: (_, index) => const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final room = _rooms[index];
-                      final privacyText = room.isPrivate ? 'Private' : 'Public';
-                      final codePrefix = room.roomCode.isNotEmpty ? 'Code: ${room.roomCode} • ' : '';
-                      return ListTile(
-                        leading: Icon(room.isPrivate ? Icons.lock : Icons.group),
-                        title: Text(room.name),
-                        subtitle: Text('$codePrefix$privacyText'),
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => RoomChatPage(
-                                socketService: widget.socketService,
-                                roomId: room.roomId,
-                                roomName: room.name,
-                                userId: widget.userId,
-                                userName: widget.userName,
-                              ),
-                            ),
+            child: _loadingRooms
+                ? const Center(child: CircularProgressIndicator())
+                : (_rooms.isEmpty
+                    ? const Center(child: Text('No rooms yet'))
+                    : ListView.separated(
+                        itemCount: _rooms.length,
+                        separatorBuilder: (_, index) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final room = _rooms[index];
+                          final privacyText = room.isPrivate ? 'Private' : 'Public';
+                          final codePrefix = room.roomCode.isNotEmpty ? 'Code: ${room.roomCode} • ' : '';
+                          return ListTile(
+                            leading: Icon(room.isPrivate ? Icons.lock : Icons.group),
+                            title: Text(room.name),
+                            subtitle: Text('$codePrefix$privacyText'),
+                            onLongPress: () => _confirmLeaveRoom(room, index),
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => RoomChatPage(
+                                    socketService: widget.socketService,
+                                    roomId: room.roomId,
+                                    roomName: room.name,
+                                    userId: widget.userId,
+                                    userName: widget.userName,
+                                  ),
+                                ),
+                              );
+                            },
                           );
                         },
-                      );
-                    },
-                  ),
+                      )),
           ),
         ],
       ),
@@ -222,7 +231,7 @@ class _RoomListPageState extends State<RoomListPage> {
     if (!mounted) return;
 
     setState(() {
-      _status = 'Loading rooms...';
+      _loadingRooms = true;
     });
 
     final payload = jsonEncode({'user_id': widget.userId});
@@ -233,18 +242,27 @@ class _RoomListPageState extends State<RoomListPage> {
     if (!mounted) return;
 
     if (raw == null) {
-      setState(() => _status = 'No room list response received.');
+      setState(() {
+        _loadingRooms = false;
+      });
+      _showSnack('No room list response received.');
       return;
     }
 
     final resp = _tryParseListRoomsResponse(raw);
     if (resp == null) {
-      setState(() => _status = 'Invalid room list response: $raw');
+      setState(() {
+        _loadingRooms = false;
+      });
+      _showSnack('Invalid room list response');
       return;
     }
 
     if (!resp.success) {
-      setState(() => _status = resp.message.isNotEmpty ? resp.message : 'Failed to load rooms.');
+      setState(() {
+        _loadingRooms = false;
+      });
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Failed to load rooms.');
       return;
     }
 
@@ -252,7 +270,7 @@ class _RoomListPageState extends State<RoomListPage> {
       _rooms
         ..clear()
         ..addAll(resp.rooms);
-      _status = resp.message.isNotEmpty ? resp.message : 'Rooms loaded.';
+      _loadingRooms = false;
     });
   }
 
@@ -276,7 +294,6 @@ class _RoomListPageState extends State<RoomListPage> {
     });
 
     _logger.i('Joining room (route 202): $payload');
-    setState(() => _status = 'Joining room...');
 
     widget.socketService.sendToRoute(202, payload);
 
@@ -284,18 +301,18 @@ class _RoomListPageState extends State<RoomListPage> {
     if (!mounted) return;
 
     if (raw == null) {
-      setState(() => _status = 'No join-room response received.');
+      _showSnack('No join-room response received.');
       return;
     }
 
     final resp = _tryParseJoinRoomResponse(raw);
     if (resp == null) {
-      setState(() => _status = 'Invalid join-room response: $raw');
+      _showSnack('Invalid join-room response');
       return;
     }
 
     if (!resp.success) {
-      setState(() => _status = resp.message.isNotEmpty ? resp.message : 'Join room failed.');
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Join room failed.');
       return;
     }
 
@@ -306,9 +323,7 @@ class _RoomListPageState extends State<RoomListPage> {
     );
 
     if (isDuplicate) {
-      setState(() {
-        _status = resp.message.isNotEmpty ? resp.message : 'Room already in list.';
-      });
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Room already in list.');
       return;
     }
 
@@ -326,7 +341,6 @@ class _RoomListPageState extends State<RoomListPage> {
           createdAt: resp.createdAt,
         ),
       );
-      _status = resp.message.isNotEmpty ? resp.message : 'Room joined.';
     });
   }
 
@@ -343,6 +357,49 @@ class _RoomListPageState extends State<RoomListPage> {
       _logger.w('Timed out waiting for join-room response: $e');
       return null;
     }
+  }
+
+  Future<void> _findRoomDialog() async {
+    final controller = TextEditingController();
+    String? result;
+    try {
+      result = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('Find public room'),
+            content: TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Room name (optional)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(''),
+                child: const Text('Random'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(dialogContext).pop(controller.text.trim()),
+                child: const Text('Find'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      _logger.e('Dialog error: $e');
+      return;
+    }
+
+    if (!mounted || result == null) return;
+
+    await _findPublicRooms(result);
   }
 
   bool _looksLikeJoinRoomJson(String raw) {
@@ -390,6 +447,332 @@ class _RoomListPageState extends State<RoomListPage> {
     }
   }
 
+  Future<void> _findPublicRooms(String name) async {
+    if (!mounted) return;
+
+    final payload = jsonEncode({
+      'user_id': widget.userId,
+      'name': name,
+    });
+
+    _logger.i('Finding public rooms (route 211): $payload');
+    widget.socketService.sendToRoute(211, payload);
+
+    final raw = await _waitForFindRoomsResponse(timeout: const Duration(seconds: 8));
+    if (!mounted) return;
+
+    if (raw == null) {
+      _showSnack('No find-room response received.');
+      return;
+    }
+
+    final resp = _tryParseFindRoomsResponse(raw);
+    if (resp == null) {
+      _showSnack('Invalid find-room response');
+      return;
+    }
+
+    if (!resp.success) {
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Find room failed.');
+      return;
+    }
+
+    if (resp.rooms.isEmpty) {
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'No public rooms found.');
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('No room found!'),
+          content: const Text('No public rooms were returned.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    final selected = await _showFoundRoomsDialog(resp.rooms);
+    if (!mounted || selected == null) return;
+
+    await _joinFoundRoom(selected);
+  }
+
+  Future<String?> _waitForFindRoomsResponse({required Duration timeout}) async {
+    try {
+      return await widget.socketService.messages
+          .where((m) => m.isNotEmpty)
+          .where((m) => !m.startsWith('Error:'))
+          .where((m) => m != 'Disconnected')
+          .where(_looksLikeFindRoomsJson)
+          .first
+          .timeout(timeout);
+    } catch (e) {
+      _logger.w('Timed out waiting for find-rooms response: $e');
+      return null;
+    }
+  }
+
+  Future<String?> _waitForLeaveRoomResponse({required Duration timeout}) async {
+    try {
+      return await widget.socketService.messages
+          .where((m) => m.isNotEmpty)
+          .where((m) => !m.startsWith('Error:'))
+          .where((m) => m != 'Disconnected')
+          .where(_looksLikeLeaveRoomJson)
+          .first
+          .timeout(timeout);
+    } catch (e) {
+      _logger.w('Timed out waiting for leave-room response: $e');
+      return null;
+    }
+  }
+
+  bool _looksLikeFindRoomsJson(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      return decoded.containsKey('success') && (decoded.containsKey('rooms') || decoded.containsKey('message'));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _looksLikeLeaveRoomJson(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      return decoded.containsKey('success') && decoded.containsKey('message');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  FindRoomsResponse? _tryParseFindRoomsResponse(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+
+      final success = decoded['success'];
+      if (success is! bool) return null;
+
+      final message = decoded['message'];
+      final roomsRaw = decoded['rooms'];
+
+      final rooms = _parseRooms(roomsRaw);
+
+      return FindRoomsResponse(
+        success: success,
+        message: message is String ? message : '',
+        rooms: rooms,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  LeaveRoomResponse? _tryParseLeaveRoomResponse(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+
+      final success = decoded['success'];
+      if (success is! bool) return null;
+
+      final message = decoded['message'];
+
+      return LeaveRoomResponse(
+        success: success,
+        message: message is String ? message : '',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<RoomSummary?> _showFoundRoomsDialog(List<RoomSummary> rooms) {
+    return showDialog<RoomSummary>(
+      context: context,
+      builder: (dialogContext) {
+        int? selectedIndex;
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Public rooms'),
+              content: SizedBox(
+                width: 400,
+                height: 320,
+                child: ListView.separated(
+                  itemCount: rooms.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final room = rooms[index];
+                    final selected = selectedIndex == index;
+                    return ListTile(
+                      title: Text(room.name),
+                      subtitle: Text(room.roomCode.isNotEmpty ? 'Code: ${room.roomCode}' : 'Room ID: ${room.roomId}'),
+                      trailing: selected ? const Icon(Icons.check_circle, color: Colors.green) : null,
+                      onTap: () {
+                        setStateDialog(() {
+                          selectedIndex = index;
+                        });
+                      },
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedIndex == null
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(rooms[selectedIndex!]),
+                  child: const Text('Join'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _confirmLeaveRoom(RoomSummary room, int index) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Leave room?'),
+          content: Text('Leave "${room.name}"?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Leave'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final payload = jsonEncode({
+      'room_id': room.roomId,
+      'user_id': widget.userId,
+    });
+
+    _logger.i('Leaving room (route 203): $payload');
+    widget.socketService.sendToRoute(203, payload);
+
+    final raw = await _waitForLeaveRoomResponse(timeout: const Duration(seconds: 8));
+    if (!mounted) return;
+
+    if (raw == null) {
+      _showSnack('No leave-room response received.');
+      return;
+    }
+
+    final resp = _tryParseLeaveRoomResponse(raw);
+    if (resp == null) {
+      _showSnack('Invalid leave-room response');
+      return;
+    }
+
+    if (!resp.success) {
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Leave room failed.');
+      return;
+    }
+
+    setState(() {
+      _rooms.removeAt(index);
+    });
+    _showSnack(resp.message.isNotEmpty ? resp.message : 'Left room.');
+  }
+
+  Future<void> _joinFoundRoom(RoomSummary room) async {
+    if (!mounted) return;
+
+    final payload = jsonEncode({
+      'user_id': widget.userId,
+      // Prefer code when available, otherwise fall back to room_id for public rooms.
+      'code': room.roomCode,
+      'room_id': room.roomId,
+    });
+
+    _logger.i('Joining found room (route 202): $payload');
+
+    widget.socketService.sendToRoute(202, payload);
+
+    final raw = await _waitForJoinRoomResponse(timeout: const Duration(seconds: 8));
+    if (!mounted) return;
+
+    if (raw == null) {
+      _showSnack('No join-room response received.');
+      return;
+    }
+
+    final resp = _tryParseJoinRoomResponse(raw);
+    if (resp == null) {
+      _showSnack('Invalid join-room response');
+      return;
+    }
+
+    if (!resp.success) {
+      _showSnack(resp.message.isNotEmpty ? resp.message : 'Join room failed.');
+      return;
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RoomChatPage(
+          socketService: widget.socketService,
+          roomId: room.roomId.isNotEmpty ? room.roomId : resp.roomId,
+          roomName: room.name.isNotEmpty ? room.name : (resp.title.isNotEmpty ? resp.title : 'Room'),
+          userId: widget.userId,
+          userName: widget.userName,
+        ),
+      ),
+    );
+  }
+
+  List<RoomSummary> _parseRooms(dynamic roomsRaw) {
+    final rooms = <RoomSummary>[];
+    if (roomsRaw is List) {
+      for (final entry in roomsRaw) {
+        if (entry is! Map) continue;
+        final roomName = entry['room_name'] ?? entry['title'];
+        final roomId = entry['room_id'] ?? entry['id'];
+        final roomCode = entry['room_code'] ?? entry['code'];
+        final isPrivate = entry['is_private'];
+        final ownerId = entry['owner_id'];
+        final createdAt = entry['created_at'];
+
+        rooms.add(
+          RoomSummary(
+            name: roomName is String && roomName.isNotEmpty ? roomName : 'Unnamed room',
+            isPrivate: isPrivate is bool ? isPrivate : false,
+            roomId: roomId is String ? roomId : '',
+            roomCode: roomCode is String ? roomCode : '',
+            ownerId: ownerId is String ? ownerId : '',
+            createdAt: createdAt is String ? createdAt : '',
+          ),
+        );
+      }
+    }
+    return rooms;
+  }
+
   Future<String?> _waitForListRoomsResponse({required Duration timeout}) async {
     try {
       return await widget.socketService.messages
@@ -427,29 +810,7 @@ class _RoomListPageState extends State<RoomListPage> {
       final message = decoded['message'];
       final roomsRaw = decoded['rooms'];
 
-      final rooms = <RoomSummary>[];
-      if (roomsRaw is List) {
-        for (final entry in roomsRaw) {
-          if (entry is! Map) continue;
-          final roomName = entry['room_name'] ?? entry['title'];
-          final roomId = entry['room_id'] ?? entry['id'];
-          final roomCode = entry['room_code'] ?? entry['code'];
-          final isPrivate = entry['is_private'];
-          final ownerId = entry['owner_id'];
-          final createdAt = entry['created_at'];
-
-          rooms.add(
-            RoomSummary(
-              name: roomName is String && roomName.isNotEmpty ? roomName : 'Unnamed room',
-              isPrivate: isPrivate is bool ? isPrivate : false,
-              roomId: roomId is String ? roomId : '',
-              roomCode: roomCode is String ? roomCode : '',
-              ownerId: ownerId is String ? ownerId : '',
-              createdAt: createdAt is String ? createdAt : '',
-            ),
-          );
-        }
-      }
+      final rooms = _parseRooms(roomsRaw);
 
       return ListRoomsResponse(
         success: success,

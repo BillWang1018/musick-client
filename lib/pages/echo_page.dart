@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/socket_service.dart';
+import 'connect_page.dart';
 import 'room_list_page.dart';
 
 class EchoPage extends StatefulWidget {
@@ -24,26 +26,33 @@ class _EchoPageState extends State<EchoPage> {
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
   late ScrollController _scrollController;
+  StreamSubscription<String>? _messageSub;
+  bool _connected = true;
 
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
+    _connected = widget.socketService.isConnected();
     _listenToMessages();
   }
 
   void _listenToMessages() {
-    widget.socketService.messages.listen((message) {
-      if (mounted) {
-        setState(() {
-          _messages.add({
-            'text': message,
-            'isReceived': !message.startsWith('[SEND]'),
-            'timestamp': DateTime.now(),
-          });
+    _messageSub = widget.socketService.messages.listen((message) {
+      if (!mounted) return;
+      final isError = message.startsWith('Error:');
+      final isDisconnect = message == 'Disconnected';
+      setState(() {
+        _messages.add({
+          'text': message,
+          'isReceived': !message.startsWith('[SEND]'),
+          'timestamp': DateTime.now(),
         });
-        _scrollToBottom();
-      }
+        if (isError || isDisconnect) {
+          _connected = false;
+        }
+      });
+      _scrollToBottom();
     });
   }
 
@@ -83,6 +92,7 @@ class _EchoPageState extends State<EchoPage> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _messageSub?.cancel();
     widget.socketService.dispose();
     super.dispose();
   }
@@ -119,12 +129,19 @@ class _EchoPageState extends State<EchoPage> {
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Center(
-                child: Row(
-                  children: [
-                    const Icon(Icons.circle, size: 12, color: Colors.green),
-                    const SizedBox(width: 8),
-                    const Text('Connected'),
-                  ],
+                child: InkWell(
+                  onTap: _handleConnectionTap,
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.circle,
+                        size: 12,
+                        color: _connected ? Colors.green : Colors.red,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(_connected ? 'Connected' : 'Disconnected'),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -186,6 +203,14 @@ class _EchoPageState extends State<EchoPage> {
           ],
         ),
       ),
+    );
+  }
+
+  void _handleConnectionTap() {
+    widget.socketService.disconnect();
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ConnectPage()),
+      (route) => false,
     );
   }
 
