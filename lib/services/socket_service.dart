@@ -1,14 +1,13 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
 import 'package:logger/logger.dart';
+import 'package:flutter/foundation.dart';
 
-class SocketService {
+class SocketService with ChangeNotifier {
   final logger = Logger();
   Socket? _socket;
   final StreamController<String> _messageStream = StreamController<String>.broadcast();
-  Uint8List _buffer = Uint8List(0); // Start empty, will grow
   String? _lastIp;
   int? _lastPort;
   Timer? _reconnectTimer;
@@ -17,8 +16,19 @@ class SocketService {
   int _reconnectAttempts = 0;
   int? _authRouteId;
   String? _authPayload;
+  Uint8List _buffer = Uint8List(0);
   
+  // 儲存辨識結果
+  Map<String, dynamic>? lastShazamResult;
+
   Stream<String> get messages => _messageStream.stream;
+
+
+  /// 清除辨識結果
+  void clearShazamResult() {
+    lastShazamResult = null;
+    notifyListeners();
+  }
 
   Future<bool> connect(String ip, int port) async {
     _manuallyDisconnected = false;
@@ -57,6 +67,7 @@ class SocketService {
         logger.i('Socket closed');
         _handleSocketClosure('Disconnected');
       },
+      cancelOnError: true,
     );
   }
 
@@ -103,40 +114,22 @@ class SocketService {
   }
 
   void _handleIncomingData(Uint8List data) {
-    // Append incoming data to buffer by creating a new buffer
     final newBuffer = Uint8List(_buffer.length + data.length);
     newBuffer.setRange(0, _buffer.length, _buffer);
     newBuffer.setRange(_buffer.length, newBuffer.length, data);
-    _buffer = newBuffer; // Reassign buffer
+    _buffer = newBuffer;
 
-    // Process complete messages from buffer
-    int offset = 0;
-    while (offset + 8 <= _buffer.length) {
-      final byteData = ByteData.view(_buffer.buffer, _buffer.offsetInBytes + offset, _buffer.length - offset);
-      final size = byteData.getInt32(0, Endian.little);
-      
-      // Check if we have a complete message
-      if (offset + 8 + size > _buffer.length) {
-        break; // Wait for more data
-      }
+    while (_buffer.length >= 8) {
+      final headerData = ByteData.view(_buffer.buffer);
+      final dataSize = headerData.getUint32(0, Endian.little);
+      final messageId = headerData.getUint32(4, Endian.little);
 
-      final id = byteData.getInt32(4, Endian.little);
-      final messageData = _buffer.sublist(offset + 8, offset + 8 + size);
-      final messageText = utf8.decode(messageData);
+      if (_buffer.length < 8 + dataSize) break;
 
-      logger.d('Received - ID: $id, Size: $size, Data: $messageText');
-      _messageStream.add(messageText);
+      final payload = _buffer.sublist(8, 8 + dataSize);
+      _buffer = _buffer.sublist(8 + dataSize);
 
-      offset += 8 + size;
-    }
-
-    // Remove processed data from buffer
-    if (offset > 0) {
-      if (offset < _buffer.length) {
-        _buffer = _buffer.sublist(offset);
-      } else {
-        _buffer = Uint8List(0); // All processed, reset buffer
-      }
+      _processMessage(messageId, payload);
     }
   }
 
@@ -173,20 +166,22 @@ class SocketService {
       logger.e('Payload too large: ${payload.length}');
       return;
     }
+  }
 
+  void _processMessage(int messageId, Uint8List payload) {
     try {
-      final size = payload.length;
-
-      final buffer = Uint8List(8 + size);
-      final byteData = ByteData.view(buffer.buffer);
-      byteData.setInt32(0, size, Endian.little);
-      byteData.setInt32(4, routeId, Endian.little);
-      buffer.setRange(8, 8 + size, payload);
-
-      socket.add(buffer);
-      socket.flush();
+      final String jsonStr = utf8.decode(payload);
+      
+      if (messageId == 401) {
+        final response = jsonDecode(jsonStr);
+        logger.i('【401】收到辨識結果: $response');
+        lastShazamResult = response;
+        notifyListeners(); 
+      } else {
+        _messageStream.add(jsonStr);
+      }
     } catch (e) {
-      logger.e('Send error: $e');
+      logger.e('解析訊息失敗: $e');
     }
   }
 
@@ -203,7 +198,9 @@ class SocketService {
     return _socket != null && !_isReconnecting;
   }
 
+  @override
   void dispose() {
+    super.dispose();
     disconnect();
     _messageStream.close();
   }
@@ -224,6 +221,40 @@ class SocketService {
       logger.i('Re-sent auth payload on route $routeId after reconnect');
     } catch (e) {
       logger.w('Failed to resend auth payload: $e');
+    }
+  }
+
+  Future<void> identifyMusic(String base64Audio) async {
+    try {
+      final requestData = jsonEncode({'audio_data': base64Audio});
+      final Uint8List payload = utf8.encode(requestData);
+      // 使用 await 確保大型數據發送完成
+      await _sendBytes(401, payload);
+    } catch (e) {
+      logger.e('發送辨識請求失敗: $e');
+    }
+  }
+
+  // 改為 Future<void> 以便支援 await
+  Future<void> _sendBytes(int routeId, Uint8List payload) async {
+    if (_socket == null) return;
+    try {
+      final header = Uint8List(8);
+      final view = ByteData.view(header.buffer);
+      // 設定數據長度 (Little Endian)
+      view.setUint32(0, payload.length, Endian.little);
+      // 設定路由 ID (Little Endian)
+      view.setUint32(4, routeId, Endian.little);
+
+      // --- 發送數據 ---
+      _socket!.add(header);  // 發送檔頭
+      _socket!.add(payload); // 發送內容
+      
+      // --- 關鍵：強制刷新緩衝區，並等待完成 ---
+      await _socket!.flush(); 
+    } catch (e) {
+      logger.e('發送失敗: $e'); 
+      disconnect();
     }
   }
 }
