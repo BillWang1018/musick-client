@@ -289,17 +289,17 @@ const List<TrackColorChoice> trackColors = [
 IconData iconForInstrument(String instrument) {
   switch (instrument) {
     case 'drums':
-      return Icons.music_note;
+      return Icons.album;
     case 'bass':
-      return Icons.piano;
+      return Icons.waves;
     case 'lead':
-      return Icons.audiotrack;
+      return Icons.looks_one;
     case 'pad':
-      return Icons.graphic_eq;
+      return Icons.margin;
     case 'pluck':
       return Icons.queue_music;
     case 'keys':
-      return Icons.keyboard;
+      return Icons.piano;
     default:
       return Icons.music_video;
   }
