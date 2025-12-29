@@ -9,13 +9,33 @@ class SocketService {
   Socket? _socket;
   final StreamController<String> _messageStream = StreamController<String>.broadcast();
   Uint8List _buffer = Uint8List(0); // Start empty, will grow
+  String? _lastIp;
+  int? _lastPort;
+  Timer? _reconnectTimer;
+  bool _manuallyDisconnected = false;
+  bool _isReconnecting = false;
+  int _reconnectAttempts = 0;
+  int? _authRouteId;
+  String? _authPayload;
   
   Stream<String> get messages => _messageStream.stream;
 
   Future<bool> connect(String ip, int port) async {
+    _manuallyDisconnected = false;
+    _lastIp = ip;
+    _lastPort = port;
+    return _openSocket(ip, port);
+  }
+
+  Future<bool> _openSocket(String ip, int port) async {
     try {
-      _socket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+      final socket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+      socket.setOption(SocketOption.tcpNoDelay, true);
+
+      _socket = socket;
+      _resetReconnectState();
       _startListening();
+      _sendPersistedAuthPayload();
       return true;
     } catch (e) {
       logger.e('Connection error: $e');
@@ -31,14 +51,55 @@ class SocketService {
       onError: (error) {
         logger.e('Socket error: $error');
         _messageStream.add('Error: $error');
-        disconnect();
+        _handleSocketClosure('Disconnected');
       },
       onDone: () {
         logger.i('Socket closed');
-        _messageStream.add('Disconnected');
-        disconnect();
+        _handleSocketClosure('Disconnected');
       },
     );
+  }
+
+  void _handleSocketClosure(String? notice) {
+    _tearDownSocket();
+    if (notice != null && !_manuallyDisconnected) {
+      _messageStream.add(notice);
+    }
+    if (_manuallyDisconnected) return;
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    final ip = _lastIp;
+    final port = _lastPort;
+    if (ip == null || port == null) return;
+    if (_isReconnecting) return;
+
+    final delaySeconds = [1, 2, 4, 8, 16][_reconnectAttempts.clamp(0, 4)];
+    _isReconnecting = true;
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () async {
+      if (_manuallyDisconnected) {
+        _isReconnecting = false;
+        return;
+      }
+
+      final ok = await _openSocket(ip, port);
+      if (ok) {
+        logger.i('Reconnected to $ip:$port');
+        _messageStream.add('Reconnected');
+      } else {
+        _isReconnecting = false;
+        _reconnectAttempts = (_reconnectAttempts + 1).clamp(0, 4);
+        _scheduleReconnect();
+      }
+    });
+  }
+
+  void _resetReconnectState() {
+    _reconnectAttempts = 0;
+    _isReconnecting = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
   }
 
   void _handleIncomingData(Uint8List data) {
@@ -88,6 +149,12 @@ class SocketService {
     sendBytes(routeId, Uint8List.fromList(utf8.encode(message)));
   }
 
+  /// Stores a payload that should be re-sent automatically after reconnect.
+  void rememberAuthPayload(int routeId, String payload) {
+    _authRouteId = routeId;
+    _authPayload = payload;
+  }
+
   /// Sends raw bytes to an arbitrary EasyTCP route ID.
   /// Packet format: Size(4)|ID(4)|Data(n) in little-endian.
   void sendBytes(int routeId, Uint8List payload) {
@@ -124,17 +191,39 @@ class SocketService {
   }
 
   void disconnect() {
-    _socket?.destroy();
-    _socket = null;
-    _buffer = Uint8List(0);
+    _manuallyDisconnected = true;
+    _resetReconnectState();
+    _tearDownSocket();
+    _authRouteId = null;
+    _authPayload = null;
+    _messageStream.add('Disconnected');
   }
 
   bool isConnected() {
-    return _socket != null;
+    return _socket != null && !_isReconnecting;
   }
 
   void dispose() {
     disconnect();
     _messageStream.close();
+  }
+
+  void _tearDownSocket() {
+    _socket?.destroy();
+    _socket = null;
+    _buffer = Uint8List(0);
+  }
+
+  void _sendPersistedAuthPayload() {
+    final routeId = _authRouteId;
+    final payload = _authPayload;
+    if (routeId == null || payload == null) return;
+
+    try {
+      sendToRoute(routeId, payload);
+      logger.i('Re-sent auth payload on route $routeId after reconnect');
+    } catch (e) {
+      logger.w('Failed to resend auth payload: $e');
+    }
   }
 }
