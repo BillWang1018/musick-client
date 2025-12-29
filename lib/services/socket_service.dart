@@ -16,10 +16,22 @@ class SocketService with ChangeNotifier {
 
   Stream<String> get messages => _messageStream.stream;
 
+  // 讓外部判斷是否連線中
+  bool get isConnected => _socket != null;
+
+  /// 清除辨識結果
+  void clearShazamResult() {
+    lastShazamResult = null;
+    notifyListeners();
+  }
+
   Future<bool> connect(String ip, int port) async {
     try {
+      if (_socket != null) await disconnect();
       _socket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
       _startListening();
+      logger.i('Connected to $ip:$port');
+      notifyListeners();
       return true;
     } catch (e) {
       logger.e('Connection error: $e');
@@ -38,10 +50,11 @@ class SocketService with ChangeNotifier {
         disconnect();
       },
       onDone: () {
-        logger.i('Socket closed');
+        logger.i('Socket closed by server');
         _messageStream.add('Disconnected');
         disconnect();
       },
+      cancelOnError: true,
     );
   }
 
@@ -69,71 +82,70 @@ class SocketService with ChangeNotifier {
     try {
       final String jsonStr = utf8.decode(payload);
       
-      // 處理 401 Shazam 辨識結果
       if (messageId == 401) {
-        // --- 這裡就是證據！直接把原始資料印出來 ---
-        print("\n\n🔥🔥🔥 [SHAZAM 原始證據] 🔥🔥🔥");
-        print(jsonStr);
-        print("🔥🔥🔥 [證據結束] 🔥🔥🔥\n\n");
-        // -------------------------------------
-
         final response = jsonDecode(jsonStr);
         logger.i('【401】收到辨識結果: $response');
         lastShazamResult = response;
         notifyListeners(); 
-      } 
-      // 處理一般訊息
-      else {
+      } else {
         _messageStream.add(jsonStr);
-        logger.i('收到 MessageID $messageId: $jsonStr');
       }
     } catch (e) {
       logger.e('解析訊息失敗: $e');
     }
   }
 
-  // 發送 Shazam 辨識請求
   Future<void> identifyMusic(String base64Audio) async {
-    if (_socket == null) return;
     try {
       final requestData = jsonEncode({'audio_data': base64Audio});
       final Uint8List payload = utf8.encode(requestData);
-      _sendBytes(401, payload); // 使用 helper 發送
-      logger.i('【401】已發送辨識請求');
+      // 使用 await 確保大型數據發送完成
+      await _sendBytes(401, payload);
     } catch (e) {
-      logger.e('發送請求失敗: $e');
+      logger.e('發送辨識請求失敗: $e');
     }
   }
 
-  // --- 補回：舊頁面需要的聊天發送功能 ---
   Future<void> sendMessage(String message) async {
-    if (_socket == null) return;
-    // 這裡假設舊的 EchoPage 只需要發送純文字，通常是用 Route 1
-    // 如果你的 EchoPage 需要特定 JSON 格式，請根據需求調整
     final payload = utf8.encode(message);
-    _sendBytes(1, Uint8List.fromList(payload));
+    await _sendBytes(1, Uint8List.fromList(payload));
   }
   
-  // 用來給 sendMessage 調用的通用發送方法 (Route 10 登入等也可以用)
   Future<void> sendToRoute(int routeId, String message) async {
-      final payload = utf8.encode(message);
-      _sendBytes(routeId, Uint8List.fromList(payload));
+    final payload = utf8.encode(message);
+    await _sendBytes(routeId, Uint8List.fromList(payload));
   }
 
-  // 底層發送 bytes 方法
-  void _sendBytes(int routeId, Uint8List payload) {
+  // 改為 Future<void> 以便支援 await
+  Future<void> _sendBytes(int routeId, Uint8List payload) async {
     if (_socket == null) return;
-    final header = Uint8List(8);
-    final view = ByteData.view(header.buffer);
-    view.setUint32(0, payload.length, Endian.little);
-    view.setUint32(4, routeId, Endian.little);
-    _socket?.add(header);
-    _socket?.add(payload);
+    try {
+      final header = Uint8List(8);
+      final view = ByteData.view(header.buffer);
+      // 設定數據長度 (Little Endian)
+      view.setUint32(0, payload.length, Endian.little);
+      // 設定路由 ID (Little Endian)
+      view.setUint32(4, routeId, Endian.little);
+
+      // --- 發送數據 ---
+      _socket!.add(header);  // 發送檔頭
+      _socket!.add(payload); // 發送內容
+      
+      // --- 關鍵：強制刷新緩衝區，並等待完成 ---
+      await _socket!.flush(); 
+    } catch (e) {
+      logger.e('發送失敗: $e'); 
+      disconnect();
+    }
   }
 
-  void disconnect() {
+  Future<void> disconnect() async {
+    try {
+      await _socket?.flush();
+    } catch (_) {}
     _socket?.destroy();
     _socket = null;
     _buffer = Uint8List(0);
+    notifyListeners();
   }
 }

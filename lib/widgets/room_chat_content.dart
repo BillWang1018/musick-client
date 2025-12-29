@@ -1,5 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../services/socket_service.dart';
 import '../models/message_model.dart';
 import 'message_bubble.dart';
@@ -36,74 +41,155 @@ class RoomChatContent extends StatefulWidget {
 
 class _RoomChatContentState extends State<RoomChatContent> {
   bool _isRecognizing = false;
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  late SocketService _socketService; 
 
-  Future<void> _handleMusicIdentify(BuildContext context) async {
-    setState(() => _isRecognizing = true);
-    try {
-      // 這裡發送假數據測試通道
-      // 實際使用時請接上 record 套件錄製的 Base64
-      String mockBase64 = "MOCK_AUDIO_DATA"; 
-      await context.read<SocketService>().identifyMusic(mockBase64);
+  @override
+  void initState() {
+    super.initState();
+    _socketService = context.read<SocketService>();
+    _socketService.addListener(_handleShazamResult);
+  }
+
+  @override
+  void dispose() {
+    _socketService.removeListener(_handleShazamResult);
+    _audioRecorder.dispose();
+    super.dispose();
+  }
+
+  // --- 核心邏輯：收到辨識結果後，模擬使用者發送訊息 ---
+  void _handleShazamResult() {
+    final result = _socketService.lastShazamResult;
+
+    if (result != null && result['success'] == true) {
+      final track = result['result']['track'];
+
+      if (track != null) {
+        final title = track['title'] ?? '未知歌名';
+        final artist = track['subtitle'] ?? '未知歌手';
+        
+        final String messageText = "🎵 我剛剛辨識到了這首歌：\n$title - $artist";
+
+        if (mounted) {
+          widget.textController.text = messageText;
+          widget.onSend();
+        }
+      }
+      _socketService.clearShazamResult();
       
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已發送辨識請求...')),
-        );
+    } else if (result != null && result['success'] == false) {
+       if (mounted) {
+         _showSnackBar('辨識失敗: ${result['message']}');
+       }
+       _socketService.clearShazamResult();
+    }
+  }
+
+  // --- 功能 A: 檔案選取辨識 (保留此功能) ---
+  Future<void> _handleFilePickAndIdentify(BuildContext context) async {
+    final socketService = context.read<SocketService>();
+    if (!socketService.isConnected) {
+      _showSnackBar('尚未連線到伺服器');
+      return;
+    }
+
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom, 
+        allowedExtensions: ['wav'], 
+      );
+
+      if (result != null && result.files.single.path != null) {
+        final file = File(result.files.single.path!);
+        
+        if (!file.path.toLowerCase().endsWith('.wav')) {
+          _showSnackBar('格式錯誤：僅支援 WAV 檔案');
+          return;
+        }
+
+        final int sizeInBytes = await file.length();
+        const int maxSizeBytes = 2 * 1024 * 1024; // 2MB
+
+        if (sizeInBytes > maxSizeBytes) {
+          _showSnackBar('檔案過大：請上傳小於 2MB 的 WAV 檔案');
+          return;
+        }
+
+        setState(() => _isRecognizing = true);
+        final bytes = await file.readAsBytes();
+        String base64Audio = base64Encode(bytes);
+        
+        await socketService.identifyMusic(base64Audio);
+        _showSnackBar('檔案已送出辨識...');
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('錯誤: $e')),
-        );
-      }
+      _showSnackBar('讀取檔案失敗: $e');
     } finally {
-      if (mounted) {
-        setState(() => _isRecognizing = false);
-      }
+      if (mounted) setState(() => _isRecognizing = false);
     }
+  }
+
+  // --- 功能 B: 錄音辨識 (邏輯保留，但按鈕已隱藏) ---
+  Future<void> _handleMusicIdentify(BuildContext context) async {
+    final socketService = context.read<SocketService>();
+    if (!socketService.isConnected) {
+      _showSnackBar('尚未連線到伺服器');
+      return;
+    }
+
+    if (!await _audioRecorder.hasPermission()) {
+      _showSnackBar('需要麥克風權限');
+      return;
+    }
+
+    setState(() => _isRecognizing = true);
+    try {
+      final directory = await getTemporaryDirectory();
+      final String path = '${directory.path}/shazam_${DateTime.now().millisecondsSinceEpoch}.m4a'; 
+
+      const config = RecordConfig(
+        encoder: AudioEncoder.wav,
+        sampleRate: 44100,
+        numChannels: 1, 
+      );
+
+      await _audioRecorder.start(config, path: path);
+      _showSnackBar('正在聆聽音樂 (6秒)...');
+
+      await Future.delayed(const Duration(seconds: 6));
+
+      if (await _audioRecorder.isRecording()) {
+        final String? finalPath = await _audioRecorder.stop();
+        if (finalPath != null && mounted) {
+          final bytes = await File(finalPath).readAsBytes();
+          print("錄音大小: ${bytes.length} bytes");
+
+          String base64Audio = base64Encode(bytes);
+          await socketService.identifyMusic(base64Audio);
+        }
+      }
+    } catch (e) {
+      _showSnackBar('錄音出錯: $e');
+    } finally {
+      if (mounted) setState(() => _isRecognizing = false);
+    }
+  }
+
+  void _showSnackBar(String msg) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
   Widget build(BuildContext context) {
-    // 監聽 SocketService 的結果變數
-    final lastResult = context.watch<SocketService>().lastShazamResult;
-
     return Column(
       children: [
-        // 顯示辨識結果的頂部橫條
-        if (lastResult != null)
-          Container(
-            color: Colors.indigo.shade50,
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-            child: Row(
-              children: [
-                const Icon(Icons.music_note, color: Colors.indigo),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    lastResult['success'] == true
-                        ? "辨識成功: ${lastResult['message']}" 
-                        : "辨識失敗: ${lastResult['message']}",
-                    style: const TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () {
-                    context.read<SocketService>().lastShazamResult = null;
-                    context.read<SocketService>().notifyListeners();
-                  },
-                )
-              ],
-            ),
-          ),
-        
         if (widget.status.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(8),
             child: Text(widget.status, textAlign: TextAlign.center),
           ),
-        
+
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.all(12),
@@ -118,19 +204,28 @@ class _RoomChatContentState extends State<RoomChatContent> {
             },
           ),
         ),
-        
+
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(8.0),
             child: Row(
               children: [
-                // 辨識按鈕
+                // 檔案選取按鈕 (保留)
+                IconButton(
+                  icon: const Icon(Icons.attach_file, color: Colors.orange),
+                  onPressed: _isRecognizing ? null : () => _handleFilePickAndIdentify(context),
+                ),
+                
+                // --- 錄音按鈕已隱藏 (邏輯保留) ---
+                /*
                 IconButton(
                   icon: _isRecognizing
                       ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.mic, color: Colors.blue),
                   onPressed: _isRecognizing ? null : () => _handleMusicIdentify(context),
                 ),
+                */
+                
                 Expanded(
                   child: TextField(
                     controller: widget.textController,
@@ -148,11 +243,7 @@ class _RoomChatContentState extends State<RoomChatContent> {
                   onPressed: widget.sending ? null : widget.onSend,
                   mini: true,
                   child: widget.sending
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                       : const Icon(Icons.send),
                 ),
               ],
