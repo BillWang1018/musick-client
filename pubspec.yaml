@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   logger: ^2.0.0
+  flutter_midi_pro: ^3.1.6
   supabase_flutter: ^2.9.0
   flutter_dotenv: ^5.2.1
   webview_flutter: ^4.4.2
@@ -25,3 +26,4 @@ flutter:
   uses-material-design: true
   assets:
     - .env
+    - assets/sf2/

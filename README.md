@@ -2,6 +2,10 @@
 
 A new Flutter project.
 
+## Recent progress
+
+- Music maker screen is cleaner: debug status text and the bottom return button were removed; playback still works as before.
+
 ## Setup
 
 ### 1) Create `.env`

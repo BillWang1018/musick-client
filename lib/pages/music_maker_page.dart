@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 
 import '../models/song_model.dart';
@@ -50,15 +51,18 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   late Song _currentSong;
   late final TrackRepository _trackRepo;
   late final TransformationController _transformController;
+  final MidiPro _midi = MidiPro();
+  int _sfId = 1;
   Timer? _playTimer;
   int _selectedTrack = 0;
   bool _showAllTracks = false;
   int _playheadStep = 0;
   bool _isPlaying = false;
-  String _lastTapInfo = 'Tap a note to debug.';
   Size _viewportSize = Size.zero;
   StreamSubscription<String>? _trackSub;
   StreamSubscription<NoteBroadcast>? _noteBroadcastSub;
+  bool _sf2Ready = false;
+  final Set<int> _sustainedPitches = <int>{};
 
   @override
   void initState() {
@@ -69,12 +73,16 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     _transformController = TransformationController();
     _trackSub = widget.socketService.messages.listen(_handleIncomingTrackMessage);
     _noteBroadcastSub = _trackRepo.noteBroadcasts(songId: widget.song.id).listen(_handleNoteBroadcast);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadInitialNotesAndTracks());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadInitialNotesAndTracks();
+      _initSoundFont();
+    });
   }
 
   @override
   void dispose() {
     _playTimer?.cancel();
+    _allNotesOff();
     _transformController.dispose();
     _noteBroadcastSub?.cancel();
     _trackSub?.cancel();
@@ -113,6 +121,22 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     });
   }
 
+  Future<void> _initSoundFont() async {
+    try {
+      _sfId = await _midi.loadSoundfontAsset(assetPath: 'assets/sf2/soundfont.sf2');
+      if (!mounted) return;
+      setState(() {
+        _sf2Ready = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _sf2Ready = false;
+      });
+      _showSnack('Soundfont load failed. Add assets/sf2/soundfont.sf2');
+    }
+  }
+
   void _applySongSettings(Song song) {
     _beatsPerMeasure = song.beatsPerMeasure > 0 ? song.beatsPerMeasure : _defaultBeatsPerMeasure;
     _basePitch = song.startPitch.clamp(0, 127).toInt();
@@ -149,7 +173,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
           ),
         ],
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(32),
+          preferredSize: const Size.fromHeight(8),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
             child: Row(
@@ -202,19 +226,6 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
           ),
           const Divider(height: 1),
           _buildTracks(),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(child: Text(_lastTapInfo)),
-                ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Return'),
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -405,7 +416,6 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       );
       setState(() {
         notes[key] = optimistic;
-        _lastTapInfo = 'On step ${step + 1}, pitch $pitch on track ${track.name}';
       });
       final response = await _trackRepo.createNote(
         userId: widget.userId,
@@ -431,7 +441,6 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     } else {
       setState(() {
         notes.remove(key);
-        _lastTapInfo = 'Off step ${step + 1}, pitch $pitch on track ${track.name}';
       });
       final response = await _trackRepo.deleteNote(
         userId: widget.userId,
@@ -509,7 +518,7 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
     _playheadStep = _stepAtCenter();
     _isPlaying = true;
     _scrollToStep(_playheadStep);
-    _announceStep(_playheadStep);
+    _handleAudioForStep(_playheadStep);
     final beatMs = (60000 / (_currentSong.bpm <= 0 ? 120 : _currentSong.bpm)).round();
     _playTimer?.cancel();
     _playTimer = Timer.periodic(Duration(milliseconds: beatMs), (_) => _advancePlayhead());
@@ -527,34 +536,74 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
       _playheadStep = nextStep;
     });
     _scrollToStep(_playheadStep);
-    _announceStep(_playheadStep);
+    _handleAudioForStep(_playheadStep);
   }
 
-  void _announceStep(int step) {
-    final playing = _playingNotesAtStep(step);
-    final pitchList = playing.isEmpty ? 'no notes' : 'pitches ${playing.map((n) => n.pitch).join(', ')}';
-    setState(() {
-      _lastTapInfo = 'Playing step ${step + 1}/${_currentSong.steps}: $pitchList';
-    });
+  void _handleAudioForStep(int step) {
+    if (!_sf2Ready) return;
+    final ending = _notesEndingAtStep(step);
+    for (final note in ending) {
+      _stopPitch(note.pitch);
+    }
+    final starting = _notesStartingAtStep(step);
+    for (final note in starting) {
+      _startPitch(note.pitch, note.velocity);
+    }
   }
 
-  List<Note> _playingNotesAtStep(int step) {
-    final result = <Note>[];
+  List<Note> _notesStartingAtStep(int step) {
+    final starting = <Note>[];
     _notesByTrackId.forEach((_, noteMap) {
       for (final note in noteMap.values) {
-        final start = note.step;
-        final end = note.step + (note.lengthSteps <= 0 ? 1 : note.lengthSteps);
-        if (step >= start && step < end) {
-          result.add(note);
+        if (note.step == step) {
+          starting.add(note);
         }
       }
     });
-    return result;
+    return starting;
+  }
+
+  List<Note> _notesEndingAtStep(int step) {
+    final ending = <Note>[];
+    _notesByTrackId.forEach((_, noteMap) {
+      for (final note in noteMap.values) {
+        if (_noteEndStep(note) == step) {
+          ending.add(note);
+        }
+      }
+    });
+    return ending;
+  }
+
+  int _noteEndStep(Note note) {
+    final length = note.lengthSteps <= 0 ? 1 : note.lengthSteps;
+    return note.step + length;
+  }
+
+  void _startPitch(int pitch, int velocity) {
+    if (!_sf2Ready) return;
+    _midi.playNote(key: pitch.clamp(0, 127), velocity: velocity.clamp(0, 127), sfId: _sfId);
+    _sustainedPitches.add(pitch);
+  }
+
+  void _stopPitch(int pitch) {
+    if (!_sf2Ready) return;
+    _midi.stopNote(key: pitch.clamp(0, 127), sfId: _sfId);
+    _sustainedPitches.remove(pitch);
+  }
+
+  void _allNotesOff() {
+    if (!_sf2Ready) return;
+    for (final pitch in _sustainedPitches.toList()) {
+      _midi.stopNote(key: pitch, sfId: _sfId);
+    }
+    _sustainedPitches.clear();
   }
 
   void _pausePlayback() {
     _playTimer?.cancel();
     _playTimer = null;
+    _allNotesOff();
     if (!mounted) return;
     setState(() {
       _isPlaying = false;
@@ -564,12 +613,12 @@ class _MusicMakerPageState extends State<MusicMakerPage> {
   void _stopAtEnd() {
     _playTimer?.cancel();
     _playTimer = null;
+    _allNotesOff();
     if (!mounted) return;
     final lastIndex = _currentSong.steps > 0 ? _currentSong.steps - 1 : 0;
     setState(() {
       _isPlaying = false;
       _playheadStep = lastIndex;
-      _lastTapInfo = 'Reached end at step ${_currentSong.steps}.';
     });
   }
 
