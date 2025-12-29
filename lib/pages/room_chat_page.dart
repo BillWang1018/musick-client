@@ -8,6 +8,7 @@ import 'package:youtube_player_iframe/youtube_player_iframe.dart' as ytp;
 import '../models/message_model.dart';
 import '../services/socket_service.dart';
 import '../widgets/room_chat_content.dart';
+import 'song_list_page.dart';
 
 class RoomChatPage extends StatefulWidget {
   final SocketService socketService;
@@ -215,6 +216,13 @@ class _RoomChatPageState extends State<RoomChatPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Room: ${widget.roomName}'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.library_music_outlined),
+            tooltip: 'View room songs',
+            onPressed: _openSongList,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -547,6 +555,19 @@ class _RoomChatPageState extends State<RoomChatPage> {
         _scrollController.jumpTo(target);
       }
     });
+  }
+
+  void _openSongList() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SongListPage(
+          roomId: widget.roomId,
+          roomName: widget.roomName,
+          socketService: widget.socketService,
+          userId: widget.userId,
+        ),
+      ),
+    );
   }
 }
 

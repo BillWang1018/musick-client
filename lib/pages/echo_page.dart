@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../services/socket_service.dart';
+import 'connect_page.dart';
+import 'community_page.dart';
 import 'room_list_page.dart';
 
 class EchoPage extends StatefulWidget {
@@ -24,26 +28,36 @@ class _EchoPageState extends State<EchoPage> {
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
   late ScrollController _scrollController;
+  StreamSubscription<String>? _messageSub;
+  bool _connected = true;
 
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
+    _connected = widget.socketService.isConnected();
     _listenToMessages();
   }
 
   void _listenToMessages() {
-    widget.socketService.messages.listen((message) {
-      if (mounted) {
-        setState(() {
-          _messages.add({
-            'text': message,
-            'isReceived': !message.startsWith('[SEND]'),
-            'timestamp': DateTime.now(),
-          });
+    _messageSub = widget.socketService.messages.listen((message) {
+      if (!mounted) return;
+      final isError = message.startsWith('Error:');
+      final isDisconnect = message == 'Disconnected';
+      final displayText = (isError || isDisconnect)
+          ? message
+          : _summarizeServerMessage(message);
+      setState(() {
+        _messages.add({
+          'text': displayText,
+          'isReceived': !message.startsWith('[SEND]'),
+          'timestamp': DateTime.now(),
         });
-        _scrollToBottom();
-      }
+        if (isError || isDisconnect) {
+          _connected = false;
+        }
+      });
+      _scrollToBottom();
     });
   }
 
@@ -83,6 +97,7 @@ class _EchoPageState extends State<EchoPage> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _messageSub?.cancel();
     widget.socketService.dispose();
     super.dispose();
   }
@@ -102,6 +117,22 @@ class _EchoPageState extends State<EchoPage> {
           actions: [
             if (widget.userId != null && widget.userId!.isNotEmpty)
               IconButton(
+                tooltip: 'Community posts',
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => CommunityPage(
+                        socketService: widget.socketService,
+                        userId: widget.userId!,
+                        userName: widget.userName,
+                      ),
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.forum),
+              ),
+            if (widget.userId != null && widget.userId!.isNotEmpty)
+              IconButton(
                 tooltip: 'Rooms',
                 onPressed: () {
                   Navigator.of(context).push(
@@ -119,12 +150,19 @@ class _EchoPageState extends State<EchoPage> {
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Center(
-                child: Row(
-                  children: [
-                    const Icon(Icons.circle, size: 12, color: Colors.green),
-                    const SizedBox(width: 8),
-                    const Text('Connected'),
-                  ],
+                child: InkWell(
+                  onTap: _handleConnectionTap,
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.circle,
+                        size: 12,
+                        color: _connected ? Colors.green : Colors.red,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(_connected ? 'Connected' : 'Disconnected'),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -187,6 +225,56 @@ class _EchoPageState extends State<EchoPage> {
         ),
       ),
     );
+  }
+
+  void _handleConnectionTap() {
+    widget.socketService.disconnect();
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ConnectPage()),
+      (route) => false,
+    );
+  }
+
+  String _summarizeServerMessage(String message) {
+    final jsonSummary = _trySummarizeJson(message);
+    if (jsonSummary != null) return jsonSummary;
+    return _truncate(message);
+  }
+
+  String? _trySummarizeJson(String message) {
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded is! Map) return null;
+
+      final routeId = decoded['route_id'] ?? decoded['routeId'] ?? decoded['id'] ?? decoded['route'];
+      final success = decoded['is_success'] ?? decoded['success'] ?? decoded['ok'];
+      final msg = decoded['message'] ?? decoded['message_text'] ?? decoded['msg'] ?? decoded['error'];
+
+      final parts = <String>[
+        _labelValue('route_id', routeId),
+        _labelValue('is_success', success),
+        _labelValue('message', msg),
+      ];
+
+      return parts.join(' | ');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _labelValue(String label, dynamic value) {
+    final safeValue = value == null ? '-' : _shortValue(value);
+    return '$label: $safeValue';
+  }
+
+  String _shortValue(dynamic value) {
+    if (value is Map || value is List) return '[data]';
+    return _truncate(value.toString());
+  }
+
+  String _truncate(String value, {int max = 120}) {
+    if (value.length <= max) return value;
+    return '${value.substring(0, max)}...';
   }
 
   Widget _buildMessageBubble(Map<String, dynamic> message) {

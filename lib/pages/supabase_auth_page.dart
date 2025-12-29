@@ -68,6 +68,7 @@ class _SupabaseAuthPageState extends State<SupabaseAuthPage> {
       }
 
       final payload = jsonEncode({'token': accessToken});
+      widget.socketService.rememberAuthPayload(widget.jwtRouteId, payload);
       widget.socketService.sendToRoute(widget.jwtRouteId, payload);
 
       setState(

@@ -2,6 +2,10 @@
 
 A new Flutter project.
 
+## Recent progress
+
+- Music maker screen is cleaner: debug status text and the bottom return button were removed; playback still works as before.
+
 ## Setup
 
 ### 1) Create `.env`
@@ -65,6 +69,16 @@ Run:
 	- Room messaging with draggable media pane
 	- Sending any YouTube link shows an "Open in player" button; player docks at the top and can be resized/closed
 	- Timestamps in messages (e.g., `03:32` or `1:02:05`) add a "Jump" button that seeks the current video without reloading
+
+- `lib/pages/song_list_page.dart`
+	- Lists songs for a room (fetch via route `510`), supports manual refresh
+	- Add button opens a dialog (default 120 BPM, 20 steps) and creates songs via route `501`
+	- Opens the music maker placeholder after creation
+
+- `lib/pages/music_maker_page.dart`
+	- Music maker UI: scrollable piano-roll grid (steps x pitches), per-track selection, note toggles
+	- Tracks can be added/removed with instrument + color metadata; taps toggle notes per track
+	- Song settings (title/BPM/steps) editable via AppBar settings; updates sent on route `511`
 
 - `lib/pages/supabase_auth_page.dart`
 	- Supabase sign-in UI

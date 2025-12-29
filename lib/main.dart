@@ -4,6 +4,9 @@ import 'package:provider/provider.dart'; // 1. 引入這行 (開關箱零件)
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'pages/connect_page.dart';
 import 'services/socket_service.dart'; // 2. 引入這行 (冷氣機)
+import 'package:logger/logger.dart';
+
+final logger = Logger();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,7 +24,7 @@ Future<void> main() async {
         anonKey: supabaseAnonKey,
       );
      } catch (e) {
-       print("Supabase 初始化警告: $e");
+       logger.w("Supabase 初始化警告: $e");
      }
   }
 
