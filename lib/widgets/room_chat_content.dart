@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:record/record.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../services/socket_service.dart';
 import '../models/message_model.dart';
@@ -89,7 +88,7 @@ class _RoomChatContentState extends State<RoomChatContent> {
   // --- 功能 A: 檔案選取辨識 (保留此功能) ---
   Future<void> _handleFilePickAndIdentify(BuildContext context) async {
     final socketService = context.read<SocketService>();
-    if (!socketService.isConnected) {
+    if (!(socketService.isConnected())) {
       _showSnackBar('尚未連線到伺服器');
       return;
     }
@@ -130,51 +129,6 @@ class _RoomChatContentState extends State<RoomChatContent> {
     }
   }
 
-  // --- 功能 B: 錄音辨識 (邏輯保留，但按鈕已隱藏) ---
-  Future<void> _handleMusicIdentify(BuildContext context) async {
-    final socketService = context.read<SocketService>();
-    if (!socketService.isConnected) {
-      _showSnackBar('尚未連線到伺服器');
-      return;
-    }
-
-    if (!await _audioRecorder.hasPermission()) {
-      _showSnackBar('需要麥克風權限');
-      return;
-    }
-
-    setState(() => _isRecognizing = true);
-    try {
-      final directory = await getTemporaryDirectory();
-      final String path = '${directory.path}/shazam_${DateTime.now().millisecondsSinceEpoch}.m4a'; 
-
-      const config = RecordConfig(
-        encoder: AudioEncoder.wav,
-        sampleRate: 44100,
-        numChannels: 1, 
-      );
-
-      await _audioRecorder.start(config, path: path);
-      _showSnackBar('正在聆聽音樂 (6秒)...');
-
-      await Future.delayed(const Duration(seconds: 6));
-
-      if (await _audioRecorder.isRecording()) {
-        final String? finalPath = await _audioRecorder.stop();
-        if (finalPath != null && mounted) {
-          final bytes = await File(finalPath).readAsBytes();
-          print("錄音大小: ${bytes.length} bytes");
-
-          String base64Audio = base64Encode(bytes);
-          await socketService.identifyMusic(base64Audio);
-        }
-      }
-    } catch (e) {
-      _showSnackBar('錄音出錯: $e');
-    } finally {
-      if (mounted) setState(() => _isRecognizing = false);
-    }
-  }
 
   void _showSnackBar(String msg) {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
