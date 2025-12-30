@@ -114,22 +114,42 @@ class SocketService with ChangeNotifier {
   }
 
   void _handleIncomingData(Uint8List data) {
+    // Append incoming data to buffer by creating a new buffer
     final newBuffer = Uint8List(_buffer.length + data.length);
     newBuffer.setRange(0, _buffer.length, _buffer);
     newBuffer.setRange(_buffer.length, newBuffer.length, data);
-    _buffer = newBuffer;
+    _buffer = newBuffer; // Reassign buffer
 
-    while (_buffer.length >= 8) {
-      final headerData = ByteData.view(_buffer.buffer);
-      final dataSize = headerData.getUint32(0, Endian.little);
-      final messageId = headerData.getUint32(4, Endian.little);
+    // Process complete messages from buffer
+    int offset = 0;
+    while (offset + 8 <= _buffer.length) {
+      final byteData = ByteData.view(_buffer.buffer, _buffer.offsetInBytes + offset, _buffer.length - offset);
+      final size = byteData.getInt32(0, Endian.little);
+      
+      // Check if we have a complete message
+      if (offset + 8 + size > _buffer.length) {
+        break; // Wait for more data
+      }
 
-      if (_buffer.length < 8 + dataSize) break;
+      final id = byteData.getInt32(4, Endian.little);
+      final messageData = _buffer.sublist(offset + 8, offset + 8 + size);
+      final messageText = utf8.decode(messageData);
 
-      final payload = _buffer.sublist(8, 8 + dataSize);
-      _buffer = _buffer.sublist(8 + dataSize);
+      logger.d('Received - ID: $id, Size: $size, Data: $messageText');
+      _messageStream.add(messageText);
 
-      _processMessage(messageId, payload);
+      offset += 8 + size;
+
+      _processMessage(id, messageData);
+    }
+
+    // Remove processed data from buffer
+    if (offset > 0) {
+      if (offset < _buffer.length) {
+        _buffer = _buffer.sublist(offset);
+      } else {
+        _buffer = Uint8List(0); // All processed, reset buffer
+      }
     }
   }
 
@@ -166,22 +186,20 @@ class SocketService with ChangeNotifier {
       logger.e('Payload too large: ${payload.length}');
       return;
     }
-  }
 
-  void _processMessage(int messageId, Uint8List payload) {
     try {
-      final String jsonStr = utf8.decode(payload);
-      
-      if (messageId == 401) {
-        final response = jsonDecode(jsonStr);
-        logger.i('【401】收到辨識結果: $response');
-        lastShazamResult = response;
-        notifyListeners(); 
-      } else {
-        _messageStream.add(jsonStr);
-      }
+      final size = payload.length;
+
+      final buffer = Uint8List(8 + size);
+      final byteData = ByteData.view(buffer.buffer);
+      byteData.setInt32(0, size, Endian.little);
+      byteData.setInt32(4, routeId, Endian.little);
+      buffer.setRange(8, 8 + size, payload);
+
+      socket.add(buffer);
+      socket.flush();
     } catch (e) {
-      logger.e('解析訊息失敗: $e');
+      logger.e('Send error: $e');
     }
   }
 
@@ -221,6 +239,23 @@ class SocketService with ChangeNotifier {
       logger.i('Re-sent auth payload on route $routeId after reconnect');
     } catch (e) {
       logger.w('Failed to resend auth payload: $e');
+    }
+  }
+
+  void _processMessage(int messageId, Uint8List payload) {
+    try {
+      final String jsonStr = utf8.decode(payload);
+      
+      if (messageId == 401) {
+        final response = jsonDecode(jsonStr);
+        logger.i('【401】收到辨識結果: $response');
+        lastShazamResult = response;
+        notifyListeners(); 
+      } else {
+        _messageStream.add(jsonStr);
+      }
+    } catch (e) {
+      logger.e('解析訊息失敗: $e');
     }
   }
 
